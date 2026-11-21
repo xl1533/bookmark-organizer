@@ -7,6 +7,7 @@
           <n-button type="primary" ghost>{{ t("importMenu") }}</n-button>
         </n-dropdown>
         <n-button @click="onExport">{{ t("exportBtn") }}</n-button>
+        <n-button @click="openCreateFolder">{{ t("newFolder") }}</n-button>
       </n-space>
       <n-space :size="8" align="center" :wrap-item="false">
         <n-button type="primary" :disabled="store.running" @click="checkAll">
@@ -48,6 +49,8 @@
             :pattern="pattern"
             :checked-keys="store.checkedIds"
             :allow-drop="allowDrop"
+            :render-suffix="renderSuffix"
+            :render-label="renderLabel"
             :expand-on-click="false"
             key-field="key"
             label-field="label"
@@ -100,6 +103,35 @@
     <DeadDialog v-model:show="showDead" @deleted="onDeadDeleted" />
     <TrashDialog v-model:show="showTrash" @changed="store.refresh()" />
     <SettingsDialog v-model:show="showSettings" />
+
+    <!-- 新建文件夹 -->
+    <n-modal
+      v-model:show="showCreateFolder"
+      preset="card"
+      :title="t('newFolderTitle')"
+      style="width: 440px"
+    >
+      <n-form label-placement="left" label-width="90">
+        <n-form-item :label="t('folderName')">
+          <n-input
+            v-model:value="newFolderName"
+            :placeholder="t('folderName')"
+            @keyup.enter="doCreateFolder"
+          />
+        </n-form-item>
+        <n-form-item :label="t('parentFolder')">
+          <n-select v-model:value="createParentId" :options="folderOptions" />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showCreateFolder = false">{{ t("cancel") }}</n-button>
+          <n-button type="primary" :loading="creatingFolder" @click="doCreateFolder">
+            {{ t("confirm") }}
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -110,8 +142,12 @@ import {
   NBadge,
   NButton,
   NDropdown,
+  NForm,
+  NFormItem,
   NInput,
+  NModal,
   NProgress,
+  NSelect,
   NSpace,
   NTag,
   NTree,
@@ -143,22 +179,86 @@ interface NodeItem extends TreeOption {
   node: TreeNode;
 }
 
-function renderSuffix({ option }: { option: TreeOption }) {
-  const item = option as NodeItem;
-  if (item.node.kind !== "bookmark") return null;
-  const st = store.effectiveStatus(item.node);
-  if (!st) return null;
-  const map = {
-    ok: { label: t("statusOk"), type: "success" as const },
-    suspicious: { label: t("statusSuspicious"), type: "warning" as const },
-    dead: { label: t("statusDead"), type: "error" as const },
-  };
-  const conf = map[st];
+const STATUS_TAG: Record<string, { text: () => string; type: "success" | "warning" | "error" }> = {
+  ok: { text: () => t("statusOk"), type: "success" },
+  suspicious: { text: () => t("statusSuspicious"), type: "warning" },
+  dead: { text: () => t("statusDead"), type: "error" },
+};
+
+function statusTag(status: string, count?: number, key?: number) {
+  const conf = STATUS_TAG[status];
+  if (!conf) return null;
+  const label = count == null ? conf.text() : `${conf.text()} ${count}`;
   return h(
     NTag,
-    { size: "tiny", type: conf.type, bordered: false, style: "margin-left: 8px" },
-    { default: () => conf.label }
+    {
+      size: "tiny",
+      type: conf.type,
+      bordered: false,
+      style: "margin-left: 8px",
+      ...(key != null ? { key } : {}),
+    },
+    { default: () => label }
   );
+}
+
+// 点击书签名称用默认浏览器打开；文件夹名称保持普通文本（点击仅展开）
+function renderLabel({ option }: { option: TreeOption }) {
+  const item = option as NodeItem;
+  if (item.node.kind !== "bookmark") return item.label;
+  return h(
+    "span",
+    {
+      class: "link-label",
+      title: t("openInBrowser"),
+      onClick: (e: MouseEvent) => {
+        e.stopPropagation();
+        void openBookmark(item.node);
+      },
+    },
+    item.label
+  );
+}
+
+async function openBookmark(node: TreeNode) {
+  if (!node.url) {
+    message.warning(t("noUrlToOpen"));
+    return;
+  }
+  try {
+    await api.openUrl(node.url);
+  } catch (e) {
+    message.error(`${t("opFailed")}: ${e}`);
+  }
+}
+
+// n-tree 的 render-suffix 是组件级 prop；挂在每个 option 上的 renderSuffix 字段不会被渲染
+function renderSuffix({ option }: { option: TreeOption }) {
+  const item = option as NodeItem;
+  if (item.node.kind === "bookmark") {
+    const st = store.effectiveStatus(item.node);
+    return st ? statusTag(st) : null;
+  }
+  // 文件夹：聚合子树内各状态数量，便于在树中一眼看到检测结果
+  const counts = subtreeStatusCounts(item);
+  const tags = [];
+  if (counts.dead > 0) tags.push(statusTag("dead", counts.dead, 1));
+  if (counts.suspicious > 0) tags.push(statusTag("suspicious", counts.suspicious, 2));
+  if (counts.ok > 0) tags.push(statusTag("ok", counts.ok, 3));
+  return tags.length ? h("span", { style: "display:inline-flex;gap:0" }, tags) : null;
+}
+
+function subtreeStatusCounts(item: NodeItem) {
+  const counts = { ok: 0, suspicious: 0, dead: 0 };
+  const walk = (n: NodeItem) => {
+    if (n.node.kind === "bookmark") {
+      const st = store.effectiveStatus(n.node);
+      if (st) counts[st as keyof typeof counts]++;
+    }
+    n.children.forEach(walk);
+  };
+  walk(item);
+  return counts;
 }
 
 const treeData = computed<NodeItem[]>(() => {
@@ -339,6 +439,69 @@ async function onDeadDeleted(n: number) {
 
 const showTrash = ref(false);
 const showSettings = ref(false);
+
+// ---------------- 新建文件夹 ----------------
+const showCreateFolder = ref(false);
+const newFolderName = ref("");
+const createParentId = ref<number | null>(null);
+const creatingFolder = ref(false);
+
+// 所有文件夹（含根）作为父目录候选项
+const folderOptions = computed(() => {
+  const folders = store.nodes.filter((n) => n.kind === "folder");
+  const isRoot = (n: TreeNode) => n.parentId === n.id;
+  const pathOf = (n: TreeNode): string => {
+    if (isRoot(n)) return t("rootFolder");
+    const parts: string[] = [n.title];
+    let cur = n;
+    let guard = 0;
+    while (guard++ < 100) {
+      const p = folders.find((f) => f.id === cur.parentId);
+      if (!p) break;
+      if (isRoot(p)) break; // 根用固定标签表示，不拼它的 title
+      parts.unshift(p.title);
+      cur = p;
+    }
+    return `${t("rootFolder")} / ${parts.join(" / ")}`;
+  };
+  return folders
+    .map((n) => ({ label: pathOf(n), value: n.id }))
+    .sort((a, b) => String(a.label).localeCompare(String(b.label)));
+});
+
+function openCreateFolder() {
+  newFolderName.value = "";
+  // 默认父目录：优先当前勾选的第一个文件夹，否则根目录
+  const checkedFolder = store.checkedIds
+    .map((id) => store.nodeById(id))
+    .find((n) => n && n.kind === "folder");
+  const root = store.nodes.find((n) => n.kind === "folder" && n.parentId === n.id);
+  createParentId.value = checkedFolder?.id ?? root?.id ?? null;
+  showCreateFolder.value = true;
+}
+
+async function doCreateFolder() {
+  const name = newFolderName.value.trim();
+  if (!name) {
+    message.warning(t("folderNameRequired"));
+    return;
+  }
+  if (createParentId.value == null) {
+    message.error(t("opFailed"));
+    return;
+  }
+  creatingFolder.value = true;
+  try {
+    await api.createFolder(createParentId.value, name, 99999);
+    showCreateFolder.value = false;
+    message.success(t("folderCreated"));
+    await store.refresh();
+  } catch (e) {
+    message.error(`${t("opFailed")}: ${e}`);
+  } finally {
+    creatingFolder.value = false;
+  }
+}
 
 // ---------------- 事件监听 ----------------
 let unlisten: UnlistenFn[] = [];

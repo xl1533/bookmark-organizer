@@ -9,6 +9,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = app
                 .path()
@@ -30,6 +31,7 @@ pub fn run() {
             commands::import_html,
             commands::export_html,
             commands::move_nodes,
+            commands::create_folder,
             commands::find_empty_folders,
             commands::delete_empty_folders,
             commands::dedup_preview,

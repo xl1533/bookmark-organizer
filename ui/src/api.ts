@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl as tauriOpenUrl } from "@tauri-apps/plugin-opener";
 import type {
   CheckFinishedEvent,
   DeadItem,
@@ -23,6 +24,11 @@ export const api = {
 
   moveNodes: (ids: number[], targetId: number, index: number): Promise<void> =>
     invoke("move_nodes", { ids, targetId, index }),
+  createFolder: (parentId: number, title: string, index: number): Promise<number> =>
+    invoke("create_folder", { parentId, title, index }),
+
+  // 用系统默认浏览器打开链接
+  openUrl: (url: string): Promise<void> => tauriOpenUrl(url),
 
   findEmptyFolders: (): Promise<ItemDto[]> => invoke("find_empty_folders"),
   deleteEmptyFolders: (ids: number[]): Promise<number> =>

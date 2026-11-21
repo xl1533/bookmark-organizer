@@ -116,6 +116,18 @@ const zh = {
   // 移动
   movedOk: "已移动 {n} 项",
   moveErrorOwnSubtree: "不能把节点移动到其自身子树内",
+  // 新建文件夹
+  newFolder: "新建文件夹",
+  newFolderTitle: "新建文件夹",
+  folderName: "文件夹名称",
+  parentFolder: "父文件夹",
+  rootFolder: "书签栏（根目录）",
+  folderCreated: "文件夹已创建",
+  folderNameRequired: "请输入文件夹名称",
+  createdInHint: "新文件夹将创建在：{name}",
+  // 打开链接
+  openInBrowser: "在浏览器中打开",
+  noUrlToOpen: "该项没有可打开的网址",
   // 错误
   opFailed: "操作失败",
 };
@@ -224,6 +236,16 @@ const en: Record<DictKey, string> = {
   selectSomeFirst: "Select bookmarks first",
   movedOk: "Moved {n} items",
   moveErrorOwnSubtree: "Cannot move a node into its own subtree",
+  newFolder: "New folder",
+  newFolderTitle: "Create folder",
+  folderName: "Folder name",
+  parentFolder: "Parent folder",
+  rootFolder: "Bookmarks bar (root)",
+  folderCreated: "Folder created",
+  folderNameRequired: "Please enter a folder name",
+  createdInHint: "Will be created in: {name}",
+  openInBrowser: "Open in browser",
+  noUrlToOpen: "This item has no URL to open",
   opFailed: "Operation failed",
 };
 

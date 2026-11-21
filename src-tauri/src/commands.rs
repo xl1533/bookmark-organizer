@@ -241,6 +241,22 @@ pub async fn move_nodes(state: State<'_, AppState>, ids: Vec<NodeId>, target_id:
     store.move_nodes(&ids, target_id, index).map_err(es)
 }
 
+/// 在指定父文件夹下新建子文件夹，返回新节点 id。
+#[tauri::command]
+pub async fn create_folder(
+    state: State<'_, AppState>,
+    parent_id: NodeId,
+    title: String,
+    index: i64,
+) -> Result<NodeId, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("文件夹名称不能为空".into());
+    }
+    let mut store = state.store.lock().unwrap();
+    store.create_folder(parent_id, title, index).map_err(es)
+}
+
 #[tauri::command]
 pub async fn find_empty_folders(state: State<'_, AppState>) -> Result<Vec<ItemDto>, String> {
     let store = state.store.lock().unwrap();

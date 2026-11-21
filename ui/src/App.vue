@@ -4,7 +4,8 @@
     :locale="localeVal"
     :date-locale="dateLocaleVal"
     :theme-overrides="overrides"
-    style="height: 100vh"
+    :style="rootStyle"
+    :class="{ 'app-dark': isDark }"
   >
     <n-message-provider>
       <n-dialog-provider>
@@ -37,6 +38,12 @@ const { isDark } = storeToRefs(store);
 const { locale } = useI18n();
 
 const naiveTheme = computed<GlobalTheme | null>(() => (isDark.value ? darkTheme : null));
+// Naive UI 的 darkTheme 只作用于组件，根页面/滚动区需要显式上色，避免"白底白字"
+const rootStyle = computed(() => ({
+  height: "100vh",
+  backgroundColor: isDark.value ? "#18181c" : "#ffffff",
+  color: isDark.value ? "#e0e0e0" : "#303133",
+}));
 const localeVal = computed(() => (locale.value === "zh" ? zhCN : enUS));
 const dateLocaleVal = computed(() => (locale.value === "zh" ? dateZhCN : dateEnUS));
 
@@ -61,5 +68,17 @@ body,
 body {
   font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+  background: #ffffff;
+  color: #303133;
+}
+body:has(.app-dark) {
+  background: #18181c;
+  color: #e0e0e0;
+}
+.link-label {
+  cursor: pointer;
+}
+.link-label:hover {
+  text-decoration: underline;
 }
 </style>

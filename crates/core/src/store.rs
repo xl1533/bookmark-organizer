@@ -363,6 +363,45 @@ impl Store {
         Ok(())
     }
 
+    /// 在指定父文件夹下新建子文件夹，返回新节点 id。
+    pub fn create_folder(&mut self, parent_id: NodeId, title: &str, index: i64) -> CoreResult<NodeId> {
+        let tx = self.conn.transaction()?;
+        let parent: Option<(String, String)> = tx
+            .query_row(
+                "SELECT kind, title FROM nodes WHERE id = ?1 AND deleted = 0",
+                params![parent_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (kind, _) = parent.ok_or_else(|| crate::CoreError::Other("目标文件夹不存在".into()))?;
+        if kind != "folder" {
+            return Err(crate::CoreError::Other("目标不是文件夹".into()));
+        }
+
+        let mut stmt = tx.prepare(
+            "SELECT id FROM nodes WHERE parent_id = ?1 AND deleted = 0 ORDER BY position, id",
+        )?;
+        let existing: Vec<NodeId> = stmt
+            .query_map(params![parent_id], |r| r.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        let at = index.clamp(0, existing.len() as i64) as usize;
+        tx.execute(
+            "INSERT INTO nodes (parent_id, kind, title, position) VALUES (?1, 'folder', ?2, 0)",
+            params![parent_id, title],
+        )?;
+        let new_id = tx.last_insert_rowid();
+        // 按目标顺序逐条编号，使 index 指定的插入位置生效
+        let mut order = existing;
+        order.insert(at, new_id);
+        for (seq, id) in order.iter().enumerate() {
+            tx.execute("UPDATE nodes SET position = ?1 WHERE id = ?2", params![seq as i64, id])?;
+        }
+        tx.commit()?;
+        Ok(new_id)
+    }
+
     /// 查找最顶层空文件夹。
     pub fn find_empty_folder_ids(&self) -> CoreResult<Vec<NodeId>> {
         let nodes = self.load_nodes(true)?;
