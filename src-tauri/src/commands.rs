@@ -8,7 +8,7 @@ use bookmark_core::checker::{test_proxy as core_test_proxy, CheckOptions, CheckS
 use bookmark_core::dedup;
 use bookmark_core::model::{NewNode, Node, NodeKind, NodeId, ROOT_ID};
 use bookmark_core::netscape;
-use bookmark_core::store::{ImportMode, ImportStats, Stats, Store, TrashEntry};
+use bookmark_core::store::{ImportMode, ImportStats, Stats, TrashEntry};
 
 use serde::Serialize;
 use tauri::{Emitter, State};
@@ -154,7 +154,7 @@ fn item_dto(id: NodeId, nodes: &HashMap<NodeId, Node>, paths: &HashMap<NodeId, S
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn get_tree(state: State<'_, AppState>) -> Result<Vec<TreeNodeDto>, String> {
+pub async fn get_tree(state: State<'_, AppState>) -> Result<Vec<TreeNodeDto>, String> {
     let store = state.store.lock().unwrap();
     let nodes = store.all_nodes().map_err(es)?;
     let checks = store.check_results_map().map_err(es)?;
@@ -184,13 +184,13 @@ async fn get_tree(state: State<'_, AppState>) -> Result<Vec<TreeNodeDto>, String
 }
 
 #[tauri::command]
-async fn get_stats(state: State<'_, AppState>) -> Result<Stats, String> {
+pub async fn get_stats(state: State<'_, AppState>) -> Result<Stats, String> {
     let store = state.store.lock().unwrap();
     store.stats().map_err(es)
 }
 
 #[tauri::command]
-async fn get_db_path(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn get_db_path(state: State<'_, AppState>) -> Result<String, String> {
     Ok(state.data_dir.join("bookmarks.db").display().to_string())
 }
 
@@ -199,7 +199,7 @@ async fn get_db_path(state: State<'_, AppState>) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn import_html(
+pub async fn import_html(
     state: State<'_, AppState>,
     path: String,
     mode: String,
@@ -221,7 +221,7 @@ async fn import_html(
 }
 
 #[tauri::command]
-async fn export_html(state: State<'_, AppState>, path: String) -> Result<usize, String> {
+pub async fn export_html(state: State<'_, AppState>, path: String) -> Result<usize, String> {
     let tree: NewNode = {
         let store = state.store.lock().unwrap();
         store.export_tree().map_err(es)?
@@ -236,13 +236,13 @@ async fn export_html(state: State<'_, AppState>, path: String) -> Result<usize, 
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn move_nodes(state: State<'_, AppState>, ids: Vec<NodeId>, target_id: NodeId, index: i64) -> Result<(), String> {
+pub async fn move_nodes(state: State<'_, AppState>, ids: Vec<NodeId>, target_id: NodeId, index: i64) -> Result<(), String> {
     let mut store = state.store.lock().unwrap();
     store.move_nodes(&ids, target_id, index).map_err(es)
 }
 
 #[tauri::command]
-async fn find_empty_folders(state: State<'_, AppState>) -> Result<Vec<ItemDto>, String> {
+pub async fn find_empty_folders(state: State<'_, AppState>) -> Result<Vec<ItemDto>, String> {
     let store = state.store.lock().unwrap();
     let ids = store.find_empty_folder_ids().map_err(es)?;
     let nodes = store.all_nodes().map_err(es)?;
@@ -255,7 +255,7 @@ async fn find_empty_folders(state: State<'_, AppState>) -> Result<Vec<ItemDto>, 
 }
 
 #[tauri::command]
-async fn delete_empty_folders(state: State<'_, AppState>, ids: Vec<NodeId>) -> Result<usize, String> {
+pub async fn delete_empty_folders(state: State<'_, AppState>, ids: Vec<NodeId>) -> Result<usize, String> {
     let mut store = state.store.lock().unwrap();
     store.soft_delete(&ids).map_err(es)
 }
@@ -265,7 +265,7 @@ async fn delete_empty_folders(state: State<'_, AppState>, ids: Vec<NodeId>) -> R
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn dedup_preview(state: State<'_, AppState>) -> Result<Vec<DupGroupDto>, String> {
+pub async fn dedup_preview(state: State<'_, AppState>) -> Result<Vec<DupGroupDto>, String> {
     let store = state.store.lock().unwrap();
     let dfs = store.dfs_bookmarks().map_err(es)?;
     let groups = dedup::find_duplicate_groups(&dfs);
@@ -294,7 +294,7 @@ async fn dedup_preview(state: State<'_, AppState>) -> Result<Vec<DupGroupDto>, S
 }
 
 #[tauri::command]
-async fn dedup_apply(state: State<'_, AppState>) -> Result<usize, String> {
+pub async fn dedup_apply(state: State<'_, AppState>) -> Result<usize, String> {
     let mut store = state.store.lock().unwrap();
     let dfs = store.dfs_bookmarks().map_err(es)?;
     let groups = dedup::find_duplicate_groups(&dfs);
@@ -313,7 +313,7 @@ async fn dedup_apply(state: State<'_, AppState>) -> Result<usize, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn start_check(
+pub async fn start_check(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     scope: String,
@@ -412,7 +412,7 @@ async fn start_check(
 }
 
 #[tauri::command]
-async fn cancel_check(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn cancel_check(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(handle) = state.run.lock().unwrap().as_ref() {
         handle.cancel.store(true, Ordering::Relaxed);
     }
@@ -421,7 +421,7 @@ async fn cancel_check(state: State<'_, AppState>) -> Result<(), String> {
 
 /// 失效项列表（删除前确认用）。
 #[tauri::command]
-async fn list_dead(state: State<'_, AppState>) -> Result<Vec<DeadItemDto>, String> {
+pub async fn list_dead(state: State<'_, AppState>) -> Result<Vec<DeadItemDto>, String> {
     let store = state.store.lock().unwrap();
     let checks = store.check_results_map().map_err(es)?;
     let nodes = store.all_nodes().map_err(es)?;
@@ -447,7 +447,7 @@ async fn list_dead(state: State<'_, AppState>) -> Result<Vec<DeadItemDto>, Strin
 
 /// 一键删除失效项：① 自动生成带时间戳的 HTML 备份 ② 软删除（可从回收站撤销）。
 #[tauri::command]
-async fn delete_dead(state: State<'_, AppState>) -> Result<DeleteDeadResult, String> {
+pub async fn delete_dead(state: State<'_, AppState>) -> Result<DeleteDeadResult, String> {
     // ① 自动备份（删除前的快照，含将删除的项）
     let backup_path = {
         let store = state.store.lock().unwrap();
@@ -456,7 +456,7 @@ async fn delete_dead(state: State<'_, AppState>) -> Result<DeleteDeadResult, Str
     };
     // ② 重新计算失效项并软删除
     let result = {
-        let store = state.store.lock().unwrap();
+        let mut store = state.store.lock().unwrap();
         let checks = store.check_results_map().map_err(es)?;
         let nodes = store.all_nodes().map_err(es)?;
         let node_map: HashMap<NodeId, Node> = nodes.iter().map(|n| (n.id, n.clone())).collect();
@@ -493,19 +493,19 @@ async fn delete_dead(state: State<'_, AppState>) -> Result<DeleteDeadResult, Str
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn trash_list(state: State<'_, AppState>) -> Result<Vec<TrashEntry>, String> {
+pub async fn trash_list(state: State<'_, AppState>) -> Result<Vec<TrashEntry>, String> {
     let store = state.store.lock().unwrap();
     store.list_trash().map_err(es)
 }
 
 #[tauri::command]
-async fn trash_restore(state: State<'_, AppState>, entry_id: i64) -> Result<(), String> {
+pub async fn trash_restore(state: State<'_, AppState>, entry_id: i64) -> Result<(), String> {
     let mut store = state.store.lock().unwrap();
     store.trash_restore(entry_id).map_err(es)
 }
 
 #[tauri::command]
-async fn trash_purge(state: State<'_, AppState>, entry_id: i64) -> Result<(), String> {
+pub async fn trash_purge(state: State<'_, AppState>, entry_id: i64) -> Result<(), String> {
     let mut store = state.store.lock().unwrap();
     store.trash_purge(entry_id).map_err(es)
 }
@@ -515,13 +515,13 @@ async fn trash_purge(state: State<'_, AppState>, entry_id: i64) -> Result<(), St
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn get_proxy(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn get_proxy(state: State<'_, AppState>) -> Result<String, String> {
     let store = state.store.lock().unwrap();
     Ok(store.get_setting("proxy").map_err(es)?.unwrap_or_default())
 }
 
 #[tauri::command]
-async fn set_proxy(state: State<'_, AppState>, proxy: String) -> Result<(), String> {
+pub async fn set_proxy(state: State<'_, AppState>, proxy: String) -> Result<(), String> {
     let mut store = state.store.lock().unwrap();
     store.set_setting("proxy", &proxy).map_err(es)
 }
@@ -535,7 +535,7 @@ pub struct ProxyTestResult {
 }
 
 #[tauri::command]
-async fn test_proxy(proxy: String) -> Result<ProxyTestResult, String> {
+pub async fn test_proxy(proxy: String) -> Result<ProxyTestResult, String> {
     let proxy_opt = if proxy.trim().is_empty() { None } else { Some(proxy.trim().to_string()) };
     match core_test_proxy(proxy_opt.as_deref()).await {
         Ok(ms) => Ok(ProxyTestResult {
