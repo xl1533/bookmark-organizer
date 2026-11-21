@@ -44,14 +44,23 @@ jobs:
 
       - name: 构建 Tauri 应用（exe + NSIS 安装包）
         working-directory: ui
+        env:
+          # Tauri CLI 只会在当前目录及其子目录中查找 tauri.conf.json（不会向上级回溯）。
+          # 本项目 src-tauri/ 与 ui/ 是兄弟目录，在 ui/ 下执行 npx tauri build 会报
+          # "Couldn't recognize the current folder as a Tauri project"，
+          # 因此用 TAURI_APP_PATH 显式指定 Tauri 项目目录。
+          TAURI_APP_PATH: ${{ github.workspace }}/src-tauri
         run: npx tauri build
 
       - name: 收集产物
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          # 产物在仓库根 target/（Cargo workspace 根）；兜底再看 src-tauri/target/
           Copy-Item target/release/bookmark-organizer.exe artifacts/ -ErrorAction SilentlyContinue
+          Copy-Item src-tauri/target/release/bookmark-organizer.exe artifacts/ -ErrorAction SilentlyContinue
           Copy-Item target/release/bundle/nsis/*.exe artifacts/ -ErrorAction SilentlyContinue
+          Copy-Item src-tauri/target/release/bundle/nsis/*.exe artifacts/ -ErrorAction SilentlyContinue
           Get-ChildItem artifacts
 
       - name: 上传产物

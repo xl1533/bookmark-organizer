@@ -87,13 +87,24 @@ bookmark-organizer/
 cd ui
 npm install
 
-# 2. 开发模式（Vite 热更新）
+# 2. 告诉 Tauri CLI 项目目录的位置（重要！）
+#    Tauri CLI 只会在「当前目录及其子目录」里查找 tauri.conf.json，
+#    而本项目 src-tauri/ 与 ui/ 是兄弟目录，必须用 TAURI_APP_PATH 指定：
+# PowerShell：
+$env:TAURI_APP_PATH = "$PWD\..\src-tauri"
+# bash：
+export TAURI_APP_PATH="$PWD/../src-tauri"
+
+# 3. 开发模式（Vite 热更新）
 npm run dev          # 仅前端调试（浏览器打开，invoke 不可用）
 npx tauri dev        # 完整桌面应用调试
 
-# 3. 构建发布版
-npx tauri build      # 产物：target/release/bookmark-organizer.exe + NSIS 安装包
+# 4. 构建发布版（产物：target/release/bookmark-organizer.exe + NSIS 安装包）
+npx tauri build
 ```
+
+> 若不设置 `TAURI_APP_PATH`，`npx tauri dev / build` 会报
+> `Couldn't recognize the current folder as a Tauri project`——CLI 在 `ui/` 下找不到 `tauri.conf.json`（它在兄弟目录 `src-tauri/` 里）。
 
 Linux 下编译 GUI 需要系统依赖：
 
