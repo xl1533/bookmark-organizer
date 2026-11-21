@@ -233,14 +233,6 @@ impl<'a> Parser<'a> {
         text
     }
 
-    fn skip_ws(&mut self) -> usize {
-        let start = self.i;
-        while self.i < self.b.len() && self.b[self.i].is_ascii_whitespace() {
-            self.i += 1;
-        }
-        self.i - start
-    }
-
     /// 当前 i 指向 '<'：跳过整个标签。
     fn skip_tag(&mut self) {
         if self.i < self.b.len() && self.b[self.i] == b'<' {
