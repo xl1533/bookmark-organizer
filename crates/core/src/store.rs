@@ -336,20 +336,29 @@ impl Store {
             affected_parents.insert(parent);
         }
 
-        // 执行移动
-        for (seq, &nid) in ids.iter().enumerate() {
+        // 执行移动：先改父节点
+        for &nid in &ids {
             tx.execute(
-                "UPDATE nodes SET parent_id = ?1, position = ?2 WHERE id = ?3",
-                params![new_parent, seq as i64, nid],
+                "UPDATE nodes SET parent_id = ?1 WHERE id = ?2",
+                params![new_parent, nid],
             )?;
         }
         affected_parents.insert(new_parent);
 
-        // 重新编号受影响父节点下的全部存活子节点
-        for parent in affected_parents {
-            renumber_children(&tx, parent)?;
+        // 按目标顺序 base_positions 显式编号，使拖拽落点（index）真正生效
+        for (seq, &nid) in base_positions.iter().enumerate() {
+            tx.execute(
+                "UPDATE nodes SET position = ?1 WHERE id = ?2 AND parent_id = ?3",
+                params![seq as i64, nid, new_parent],
+            )?;
         }
-        let _ = &base_positions;
+
+        // 重新编号受影响的老父节点（new_parent 已按 base_positions 编好，跳过）
+        for parent in affected_parents {
+            if parent != new_parent {
+                renumber_children(&tx, parent)?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }

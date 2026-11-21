@@ -18,6 +18,8 @@
 import { computed } from "vue";
 import {
   NConfigProvider,
+  NDialogProvider,
+  NMessageProvider,
   darkTheme,
   dateEnUS,
   dateZhCN,
