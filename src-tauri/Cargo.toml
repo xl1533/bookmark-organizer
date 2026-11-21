@@ -1,0 +1,22 @@
+[package]
+name = "bookmark-organizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bookmark Organizer desktop app (Tauri 2)"
+
+[lib]
+name = "bookmark_organizer_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+bookmark-core = { path = "../crates/core" }

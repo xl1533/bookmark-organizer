@@ -1,0 +1,68 @@
+name: Build Windows EXE
+
+# 推送到 main / 打 tag / 手动触发时：
+# 1. 在 Windows Runner 上构建 Rust + Vue 前端
+# 2. 产出免安装单文件 exe（WebView2 使用系统组件）
+# 3. 产出 NSIS 安装包
+# 4. 同时在 Windows 上跑一遍 core crate 单元测试
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust 编译缓存
+        uses: Swatinem/rust-cache@v2
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: 安装前端依赖
+        working-directory: ui
+        run: npm ci
+
+      - name: 运行 core 单元测试
+        run: cargo test -p bookmark-core --release
+
+      - name: 构建 Tauri 应用（exe + NSIS 安装包）
+        working-directory: ui
+        run: npx tauri build
+
+      - name: 收集产物
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item target/release/bookmark-organizer.exe artifacts/ -ErrorAction SilentlyContinue
+          Copy-Item target/release/bundle/nsis/*.exe artifacts/ -ErrorAction SilentlyContinue
+          Get-ChildItem artifacts
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: BookmarkOrganizer-windows
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag 推送）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

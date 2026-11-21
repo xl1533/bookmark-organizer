@@ -1,0 +1,21 @@
+[package]
+name = "bookmark-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bookmark Organizer core logic: no platform APIs, pure Rust"
+
+[dependencies]
+serde = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+url = "2"
+sha2 = "0.10"
+thiserror = "2"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"

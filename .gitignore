@@ -1,0 +1,18 @@
+# Rust
+/target
+**/*.rs.bk
+
+# 前端
+ui/node_modules/
+ui/dist/
+
+# 本地数据库 / 备份
+*.db
+*.db-wal
+*.db-shm
+backups/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
