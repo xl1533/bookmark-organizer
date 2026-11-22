@@ -262,6 +262,12 @@ const zh = {
     "链接检测仅发送 HEAD/GET、不提交任何数据；WebDAV 会由你主动把完整书签备份上传到你自己配置的私有服务器，二者不同。",
   webdavLocalOnly: "凭据仅存于本机数据库，不会自动上传；服务器管理员可读备份内容。",
   webdavNeverOverwrite: "上传使用时间戳文件名且永不覆盖已有文件。",
+  webdavLoadList: "刷新文件列表",
+  webdavImportTitle: "确认从远端导入",
+  webdavNoSelection: "请先选择远端文件",
+  webdavBackupPath: "本地备份",
+  webdavRemotePath: "远端路径",
+  webdavImporting: "正在导入…",
   // 设置：增量阈值
   settingsIncrementalDays: "增量检测超期阈值（天）",
   settingsIncrementalHint: "超过该天数未检测的书签会进入增量检测队列，默认 7 天。",
@@ -525,6 +531,12 @@ const en: Record<DictKey, string> = {
   webdavLocalOnly:
     "Credentials are stored only in the local database and are never uploaded automatically. The server administrator can read backup content.",
   webdavNeverOverwrite: "Uploads use timestamped names and never overwrite existing files.",
+  webdavLoadList: "Refresh file list",
+  webdavImportTitle: "Confirm remote import",
+  webdavNoSelection: "Select a remote file first",
+  webdavBackupPath: "Local backup",
+  webdavRemotePath: "Remote path",
+  webdavImporting: "Importing…",
   // Settings: incremental threshold
   settingsIncrementalDays: "Incremental check threshold (days)",
   settingsIncrementalHint:

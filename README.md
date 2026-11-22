@@ -3,7 +3,7 @@
 基于 **Rust 核心 + Tauri 2** 的本地书签整理工具。导入浏览器收藏夹（Chrome / Edge / Firefox 导出的
 Netscape HTML），在树形视图中整理、去重、检测链接有效性，并安全删除失效项（自动备份 + 回收站可撤销）。
 
-> 本仓库交付第 1 期（MVP）全部 8 项功能；第 2 / 3 期功能见文末路线图。
+> 本仓库交付第 1 期（MVP）全部 8 项功能与第 2 期全部 6 项功能；第 3 期功能见文末路线图。
 
 ---
 
@@ -27,8 +27,30 @@ Netscape HTML），在树形视图中整理、去重、检测链接有效性，�
 - **失效**：其余 4xx / 5xx、DNS 失败、连接失败、连接 / 读取超时（10s，重试 2 次后仍失败）
 - 局限声明：`HTTP 检测无法识别 Cloudflare 拦截页和 SPA 假 200，属尽力检测`
 
-**非功能约束（已落实）**：不执行网页任何 JS（纯 HTTP 客户端）；所有请求仅 GET / HEAD，不提交任何数据；
-书签数据全部本地存储，不发送任何第三方。
+**非功能约束（已落实）**：不执行网页任何 JS（纯 HTTP 客户端）；链接检测的请求仅 GET / HEAD，不提交任何数据；
+书签数据全部本地存储，不发送任何第三方。WebDAV 备份是**用户主动配置、主动触发**的例外（见下方隐私说明）。
+
+---
+
+## 功能（第 2 期，全部完成）
+
+| # | 功能 | 说明 |
+|---|------|------|
+| 9 | 模糊去重 | 可配置「忽略 query / 路径大小写 / 末尾斜杠 / fragment」四个开关，开关持久化；切换即重算预览；应用后重复项软删除进回收站；全关时等同精确去重 |
+| 10 | 合并重复文件夹 | 同名文件夹（忽略大小写与首尾空白）分组预览，保留项可改；子项与同名子文件夹全部递归合并，顺序不变；应用前自动 HTML 备份 |
+| 11 | 增量检测 | 只检测新增、URL 严格哈希变更、超过 N 天（默认 7）未检测的项；跳过项保留原检测状态；复用进度/完成事件与取消机制 |
+| 12 | 更新重定向 | 将检测到的最终地址预览后写回书签，并同步刷新检测缓存的 URL/哈希；写回前自动 HTML 备份 |
+| 13 | 规则归类 | 域名 / URL 关键词 / 标题关键词的包含匹配规则（可增删改排序、持久化）；先预览命中再逐条勾选应用，自动建目录、冲突不覆盖 |
+| 14 | WebDAV 备份同步 | 设置页手动配置服务器（默认仅 https）、Basic 认证、代理复用；上传自动备份到自配服务器，远端时间戳文件名永不覆盖；下载列表选文件后按替换/追加确认导入 |
+
+### 隐私边界：链接检测 ≠ WebDAV 上传
+
+- **链接检测**仅向目标网址发送 HEAD（不支持时降级 GET）请求读取响应头，**不提交任何数据、不执行 JS、不外发本地书签**。
+- **WebDAV** 完全由你主动开启：你在设置页填写自己的服务器 URL 与凭据，点击「上传备份」时，才会把**完整书签 HTML 备份** PUT 到你自己的私有服务器；不存在后台自动同步，也不做自动双向合并或覆盖裁决。
+- 两者是**不同的功能与不同的数据流向**：即使你从未配置 WebDAV，检测也照常工作、且不会上报任何书签数据。
+- 默认只允许 https（仅 localhost / 127.0.0.1 可在明确提示后开启 http）；凭据以明文保存在本机 SQLite `settings` 表，**不会自动上传**，请自行控制数据库文件访问权限。
+- 备份内容**不加密**，传输依靠 HTTPS；服务器管理员可以读取备份内容。这是你自有服务器的可信边界，请在配置前知悉。
+- 上传使用带时间戳的文件名并附带 `If-None-Match: *`，**永不覆盖**已有远端文件；下载导入前必须选择「替换 / 追加」并确认，临时下载文件导入后立即删除（无论成功失败）。
 
 ---
 
@@ -44,11 +66,13 @@ bookmark-organizer/
 │       ├── dedup.rs      #   精确去重（DFS 顺序 keep-first）
 │       ├── empty.rs      #   空文件夹检测（两阶段：计数 + 剪枝）
 │       ├── checker.rs    #   链接检测器（reqwest + rustls，Semaphore 并发）
+│       ├── rules.rs      #   第 2 期：规则模型与匹配引擎
+│       ├── webdav.rs     #   第 2 期：WebDAV 客户端（PROPFIND / PUT / GET）
 │       ├── store.rs      #   SQLite 持久化（rusqlite bundled，软删除 / 回收站）
 │       ├── backup.rs     #   时间戳 HTML 备份
 │       └── tests/        #   集成测试 + wiremock mock server + 验收场景测试
 ├── src-tauri/            # Tauri 2 桌面壳
-│   ├── src/commands.rs   #   20 个 invoke 命令（薄封装 core）
+│   ├── src/commands.rs   #   invoke 命令（薄封装 core，含第 2 期各功能）
 │   ├── src/state.rs      #   AppState（Store / 检测任务句柄）
 │   ├── tauri.conf.json   #   单文件 exe / NSIS 配置
 │   └── icons/            #   应用图标
@@ -121,7 +145,7 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
 cargo test -p bookmark-core
 ```
 
-覆盖 41 个测试，包括：
+覆盖核心算法与各功能的单元测试和网络 mock，包括：
 
 - `netscape_tests`：Chrome / Firefox 风格夹具解析、往返一致性、残缺 HTML 容错、实体解码
 - `checker_tests`（**wiremock mock server**）：200 / 404 / 5xx 重试 / 403 可疑 / HEAD→GET 兜底 /
@@ -146,7 +170,12 @@ cargo test -p bookmark-core
    `backups/bookmarks_backup_YYYYMMDD_HHMMSS.html` 备份并软删除。
 8. **回收站**：任意删除操作均可从回收站「恢复」或「彻底删除」。
 9. **设置**：界面语言（中文 / English）、主题（跟随系统 / 浅色 / 深色）、HTTP 代理与连通性测试、
-   数据库文件位置。
+   数据库文件位置、增量检测超期天数。
+10. **整理工具**：工具栏下拉菜单提供精确/模糊去重、合并重复文件夹、更新重定向、规则归类；每个操作均先预览确认，
+    破坏性操作前自动生成 HTML 备份（撤销 = 用该备份以替换模式重新导入）。
+11. **WebDAV 备份**：在设置页展开「WebDAV 备份」，填写服务器 URL / 用户名 / 密码 / 远端目录，
+    可先「测试连接」再「保存配置」；「上传备份」生成时间戳 HTML 并上传（永不覆盖）；
+    「刷新文件列表」后选择远端文件、点「下载并导入」，在确认框中选择替换或追加。详见上方隐私边界说明。
 
 数据文件：`%APPDATA%/com.bookmarkorganizer.desktop/bookmarks.db`（Windows）。
 
@@ -169,11 +198,11 @@ cargo test -p bookmark-core
 
 ## 路线图
 
-- **第 2 期**：模糊去重（`urlnorm::FuzzyOptions` 已预留 ignore_query / ignore_case / ignore_trailing_slash /
-  ignore_fragment 四个开关）、合并重复文件夹、增量检测（结果缓存已有 `check_results` 表支撑）、
-  重定向链接自动更新为最终地址（检测器已记录 `final_url`）、域名 + 关键词规则自动归类（应用前预览）、WebDAV 备份同步
-- **第 3 期（可选）**：AI 自动打标签 / 摘要（OpenAI 兼容 API 或本地 Ollama，仅在用户显式配置后启用、发送前确认）、
-  Tauri 2 Android 打包（core crate 无平台 API，可直接复用）
+- **第 2 期（已完成）**：模糊去重（`urlnorm::FuzzyOptions` 的 ignore_query / ignore_case / ignore_trailing_slash /
+  ignore_fragment 四个开关）、合并重复文件夹、增量检测（复用 `check_results` 缓存）、
+  重定向链接自动更新为最终地址（复用检测器 `final_url`）、域名 + 关键词规则自动归类（应用前预览）、WebDAV 备份同步
+- **第 3 期（可选）**：AI 自动打标签 / 摘要、Tauri 2 Android 打包（core crate 无平台 API，可直接复用）
+  ——本期及第 2 期均不包含任何 AI 入口或相关文案
 
 ## 已知限制
 

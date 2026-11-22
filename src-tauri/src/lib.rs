@@ -64,6 +64,10 @@ pub fn run() {
             commands::test_proxy,
             commands::get_setting,
             commands::set_setting,
+            commands::webdav_test,
+            commands::webdav_upload,
+            commands::webdav_list,
+            commands::webdav_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

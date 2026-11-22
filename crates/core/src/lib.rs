@@ -8,8 +8,8 @@
 //!   时间戳 HTML 备份与回收站（软删除/恢复）
 //!
 //! ## 非功能约束（由调用方与 crate 共同保证）
-//! - 所有网络请求仅为 GET/HEAD，不提交任何数据，不执行任何网页 JS
-//! - 本地书签数据不会发送到任何第三方
+//! - 链接检测的网络请求仅为 GET/HEAD，不提交任何数据，不执行任何网页 JS
+//! - 本地书签数据不会发送到任何第三方；#14 WebDAV 备份由用户主动上传到自配服务器
 
 pub mod backup;
 pub mod checker;
@@ -20,11 +20,13 @@ pub mod netscape;
 pub mod rules;
 pub mod store;
 pub mod urlnorm;
+pub mod webdav;
 
 pub use checker::{CheckOptions, CheckResult, CheckStatus, CheckTarget, LinkChecker};
 pub use model::{NewNode, Node, NodeId, NodeKind, ROOT_ID};
 pub use rules::{Rule, RuleField, RuleInput, RuleSet};
 pub use store::{Store, TrashEntry};
+pub use webdav::{WebDavClient, WebDavConfig, WebDavFile};
 
 /// 统一错误类型。
 #[derive(Debug, thiserror::Error)]

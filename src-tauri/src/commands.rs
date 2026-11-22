@@ -9,6 +9,7 @@ use bookmark_core::dedup;
 use bookmark_core::model::{NewNode, Node, NodeKind, NodeId, ROOT_ID};
 use bookmark_core::netscape;
 use bookmark_core::rules::{Rule, RuleField, RuleInput, RuleSet};
+use bookmark_core::webdav::{WebDavClient, WebDavConfig};
 use bookmark_core::Store;
 use bookmark_core::store::{
     is_http_url, ImportMode, ImportStats, MergeFolderGroup, MergeOutcome, Stats, TrashEntry,
@@ -206,7 +207,6 @@ pub struct ClassifyChoiceDto {
 }
 
 /// #14 WebDAV 配置（先测后存；密码明文仅存本机 settings）。
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebDavConfigDto {
@@ -217,7 +217,6 @@ pub struct WebDavConfigDto {
     pub allow_http: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebDavFileDto {
@@ -226,7 +225,6 @@ pub struct WebDavFileDto {
     pub modified: i64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebDavUploadDto {
@@ -238,6 +236,16 @@ pub struct WebDavUploadDto {
 // ---------------------------------------------------------------------------
 // 内部工具
 // ---------------------------------------------------------------------------
+
+/// #14 WebDAV settings 键（与 phase2-design §3.2 一致）。
+const WEBDAV_URL_KEY: &str = "webdav_url";
+const WEBDAV_USER_KEY: &str = "webdav_user";
+const WEBDAV_PASSWORD_KEY: &str = "webdav_password";
+const WEBDAV_DIR_KEY: &str = "webdav_dir";
+const WEBDAV_ALLOW_HTTP_KEY: &str = "webdav_allow_http";
+
+/// WebDAV 导入临时文件序号：同一毫秒内多次导入也不冲突。
+static WEBDAV_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 规则 id 序号：同一毫秒内新增多条也不冲突。
 static RULE_ID_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -263,6 +271,37 @@ fn save_rule_set(store: &mut Store, rules: &RuleSet) -> Result<(), String> {
     store
         .set_setting("classify_rules", &rules.to_settings_json())
         .map_err(es)
+}
+
+/// 从本机 settings 读取 WebDAV 配置；缺省目录回退为 `/`。
+fn load_webdav_config(store: &Store) -> Result<WebDavConfig, String> {
+    let get = |key: &str| store.get_setting(key).map_err(es);
+    let dir = get(WEBDAV_DIR_KEY)?.unwrap_or_else(|| "/".to_string());
+    Ok(WebDavConfig {
+        url: get(WEBDAV_URL_KEY)?.unwrap_or_default(),
+        user: get(WEBDAV_USER_KEY)?.unwrap_or_default(),
+        password: get(WEBDAV_PASSWORD_KEY)?.unwrap_or_default(),
+        dir: if dir.trim().is_empty() { "/".to_string() } else { dir },
+        allow_http: matches!(get(WEBDAV_ALLOW_HTTP_KEY)?.as_deref(), Some("1")),
+    })
+}
+
+/// 读取配置（单独加锁，避免与网络请求交叉持锁）。
+fn webdav_config_from_state(state: &AppState) -> Result<WebDavConfig, String> {
+    let store = state.store.lock().unwrap();
+    load_webdav_config(&store)
+}
+
+/// 构造 WebDAV 客户端并复用设置中的 HTTP 代理。
+fn webdav_client(state: &AppState, cfg: WebDavConfig) -> Result<WebDavClient, String> {
+    let proxy = {
+        let store = state.store.lock().unwrap();
+        store
+            .get_setting("proxy")
+            .map_err(es)?
+            .filter(|p| !p.trim().is_empty())
+    };
+    WebDavClient::new(cfg, proxy).map_err(es)
 }
 
 fn validate_rule_fields(pattern: &str, target_path: &str) -> Result<(), String> {
@@ -1162,4 +1201,123 @@ pub async fn test_proxy(proxy: String) -> Result<ProxyTestResult, String> {
             message: e,
         }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// #14 WebDAV 备份同步（先测后存：test 用当前表单，其余从 settings 读）
+// ---------------------------------------------------------------------------
+
+/// 测试连接：只测不存，配置来自 UI 当前表单。
+#[tauri::command]
+pub async fn webdav_test(
+    state: State<'_, AppState>,
+    cfg: WebDavConfigDto,
+) -> Result<ProxyTestResult, String> {
+    let cfg = WebDavConfig {
+        url: cfg.url,
+        user: cfg.user,
+        password: cfg.password,
+        dir: cfg.dir,
+        allow_http: cfg.allow_http,
+    };
+    let client = webdav_client(&state, cfg)?;
+    match client.test().await {
+        Ok(ms) => Ok(ProxyTestResult {
+            ok: true,
+            latency_ms: Some(ms.max(0) as u64),
+            message: format!("连接成功，延迟 {ms} ms"),
+        }),
+        Err(e) => Ok(ProxyTestResult {
+            ok: false,
+            latency_ms: None,
+            message: e.to_string(),
+        }),
+    }
+}
+
+/// 上传备份：生成时间戳 HTML 后 PUT 到远端，永不覆盖同名文件。
+#[tauri::command]
+pub async fn webdav_upload(state: State<'_, AppState>) -> Result<WebDavUploadDto, String> {
+    let cfg = webdav_config_from_state(&state)?;
+    let client = webdav_client(&state, cfg)?;
+
+    let backup_path = {
+        let store = state.store.lock().unwrap();
+        bookmark_core::backup::create_backup(&store, &state.data_dir.join("backups")).map_err(es)?
+    };
+    let name = backup_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "备份文件名无效".to_string())?
+        .to_string();
+    let bytes = std::fs::read(&backup_path).map_err(|e| format!("读取备份文件失败: {e}"))?;
+    let remote_path = client.upload(&name, &bytes).await.map_err(es)?;
+
+    Ok(WebDavUploadDto {
+        backup_path: backup_path.display().to_string(),
+        remote_path,
+        bytes: bytes.len() as i64,
+    })
+}
+
+/// 列出远端 HTML 备份文件。
+#[tauri::command]
+pub async fn webdav_list(state: State<'_, AppState>) -> Result<Vec<WebDavFileDto>, String> {
+    let cfg = webdav_config_from_state(&state)?;
+    let client = webdav_client(&state, cfg)?;
+    let files = client.list().await.map_err(es)?;
+    Ok(files
+        .into_iter()
+        .map(|f| WebDavFileDto {
+            name: f.name,
+            size: f.size,
+            modified: f.modified,
+        })
+        .collect())
+}
+
+/// 下载远端备份到唯一临时文件，按 replace/append 同语义导入，成功失败都清理。
+#[tauri::command]
+pub async fn webdav_import(
+    state: State<'_, AppState>,
+    name: String,
+    mode: String,
+) -> Result<ImportSummary, String> {
+    let import_mode = match mode.as_str() {
+        "append" => ImportMode::Append,
+        "replace" => ImportMode::Replace,
+        _ => return Err("导入方式只能是 replace 或 append".to_string()),
+    };
+    let cfg = webdav_config_from_state(&state)?;
+    let client = webdav_client(&state, cfg)?;
+    let bytes = client.download(&name).await.map_err(es)?;
+
+    let dir = state.data_dir.join("tmp");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
+    let tmp_path = dir.join(format!(
+        "webdav_import_{}_{}.html",
+        chrono::Utc::now().timestamp_millis(),
+        WEBDAV_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp_path, &bytes).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("写入临时文件失败: {e}")
+    })?;
+
+    let result = (|| -> Result<ImportSummary, String> {
+        let html = std::fs::read_to_string(&tmp_path)
+            .map_err(|e| format!("远端备份不是有效的 UTF-8 HTML: {e}"))?;
+        let parsed = netscape::parse(&html).map_err(es)?;
+        let stats: ImportStats = {
+            let mut store = state.store.lock().unwrap();
+            store.import_children(&parsed.children, import_mode).map_err(es)?
+        };
+        Ok(ImportSummary {
+            folders: stats.folders,
+            bookmarks: stats.bookmarks,
+        })
+    })();
+
+    let _ = std::fs::remove_file(&tmp_path);
+    result
 }

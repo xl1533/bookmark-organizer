@@ -174,4 +174,55 @@ export async function setFuzzyOptions(opts: FuzzyOptions): Promise<void> {
   }
 }
 
+/** #14 WebDAV settings 键（5 个，凭据明文仅存本机 SQLite）。 */
+export const WEBDAV_SETTINGS_KEYS = {
+  url: "webdav_url",
+  user: "webdav_user",
+  password: "webdav_password",
+  dir: "webdav_dir",
+  allowHttp: "webdav_allow_http",
+} as const;
+
+/** #14 WebDAV 配置默认值：仅 https、目录为根。 */
+export const DEFAULT_WEBDAV_CONFIG: WebDavConfig = {
+  url: "",
+  user: "",
+  password: "",
+  dir: "/",
+  allowHttp: false,
+};
+
+/** 从本机 settings 读取 WebDAV 配置；缺省/异常回退默认值。 */
+export async function getWebDavConfig(): Promise<WebDavConfig> {
+  try {
+    const [url, user, password, dir, allowHttp] = await Promise.all([
+      api.getSetting(WEBDAV_SETTINGS_KEYS.url),
+      api.getSetting(WEBDAV_SETTINGS_KEYS.user),
+      api.getSetting(WEBDAV_SETTINGS_KEYS.password),
+      api.getSetting(WEBDAV_SETTINGS_KEYS.dir),
+      api.getSetting(WEBDAV_SETTINGS_KEYS.allowHttp),
+    ]);
+    return {
+      url: url ?? "",
+      user: user ?? "",
+      password: password ?? "",
+      dir: dir && dir.trim() !== "" ? dir : "/",
+      allowHttp: allowHttp === "1",
+    };
+  } catch {
+    return { ...DEFAULT_WEBDAV_CONFIG };
+  }
+}
+
+/** 写入 5 个 webdav_* 键；先测后存由调用方保证。 */
+export async function saveWebDavConfig(cfg: WebDavConfig): Promise<void> {
+  await Promise.all([
+    api.setSetting(WEBDAV_SETTINGS_KEYS.url, cfg.url.trim()),
+    api.setSetting(WEBDAV_SETTINGS_KEYS.user, cfg.user.trim()),
+    api.setSetting(WEBDAV_SETTINGS_KEYS.password, cfg.password),
+    api.setSetting(WEBDAV_SETTINGS_KEYS.dir, cfg.dir.trim() || "/"),
+    api.setSetting(WEBDAV_SETTINGS_KEYS.allowHttp, cfg.allowHttp ? "1" : "0"),
+  ]);
+}
+
 export type { CheckFinishedEvent };
