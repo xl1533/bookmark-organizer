@@ -1,3 +1,15 @@
+// 屏蔽 WebView 自带的浏览器右键菜单（树节点上使用应用自己的上下文菜单）。
+// 输入框/可编辑区域保留原生菜单，以便复制粘贴。
+window.addEventListener(
+  "contextmenu",
+  (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+    event.preventDefault();
+  },
+  true
+);
+
 // 启动错误可视化：任何导致白屏的 JS 错误都会以红字浮层显示，方便诊断
 function showFatal(title: string, detail: unknown) {
   const err = detail as { stack?: string; message?: string } | undefined;

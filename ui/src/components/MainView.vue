@@ -49,6 +49,7 @@
             :pattern="pattern"
             :checked-keys="store.checkedIds"
             :allow-drop="allowDrop"
+            :node-props="treeNodeProps"
             :render-suffix="renderSuffix"
             :render-label="renderLabel"
             :expand-on-click="false"
@@ -56,6 +57,8 @@
             label-field="label"
             children-field="children"
             @update:checked-keys="onChecked"
+            @dragstart="onTreeDragStart"
+            @dragend="onTreeDragEnd"
             @drop="handleDrop"
           />
           <div v-if="store.nodes.length === 0" class="empty-tip">{{ t("noBookmarks") }}</div>
@@ -104,6 +107,60 @@
     <TrashDialog v-model:show="showTrash" @changed="store.refresh()" />
     <SettingsDialog v-model:show="showSettings" />
 
+    <!-- 树节点右键菜单（浏览器原生菜单已在 main.ts 中屏蔽） -->
+    <n-dropdown
+      trigger="manual"
+      :show="ctxMenu.show"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      :options="ctxOptions"
+      @select="onCtxSelect"
+      @update:show="(v) => (ctxMenu.show = v)"
+    />
+
+    <!-- 右键「移动到…」 -->
+    <n-modal
+      v-model:show="showMoveModal"
+      preset="card"
+      :title="t('moveTitle', { n: moveIds.length })"
+      style="width: 440px"
+    >
+      <n-form label-placement="left" label-width="90">
+        <n-form-item :label="t('moveTarget')">
+          <n-select v-model:value="moveTargetId" :options="moveOptions" />
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showMoveModal = false">{{ t("cancel") }}</n-button>
+          <n-button type="primary" :loading="moving" @click="doMove">
+            {{ t("moveConfirm") }}
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 右键「删除」 -->
+    <n-modal
+      v-model:show="showDeleteModal"
+      preset="card"
+      :title="t('deleteTitle', { n: deleteIds.length })"
+      style="width: 460px"
+    >
+      <p class="delete-hint">{{ t("deleteHint") }}</p>
+      <ul class="delete-list">
+        <li v-for="(name, i) in deleteNames" :key="i">{{ name }}</li>
+      </ul>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showDeleteModal = false">{{ t("cancel") }}</n-button>
+          <n-button type="error" ghost :loading="deleting" @click="doDelete">
+            {{ t("ctxDelete") }}
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
     <!-- 新建文件夹 -->
     <n-modal
       v-model:show="showCreateFolder"
@@ -111,11 +168,13 @@
       :title="t('newFolderTitle')"
       style="width: 440px"
     >
+      <p class="create-hint">{{ t("createdInHint", { name: parentFolderName }) }}</p>
       <n-form label-placement="left" label-width="90">
         <n-form-item :label="t('folderName')">
           <n-input
             v-model:value="newFolderName"
             :placeholder="t('folderName')"
+            autofocus
             @keyup.enter="doCreateFolder"
           />
         </n-form-item>
@@ -136,7 +195,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, onUnmounted, ref } from "vue";
+import { computed, h, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   NAlert,
   NBadge,
@@ -297,7 +356,66 @@ function onChecked(keys: number[]) {
   store.checkedIds = keys;
 }
 
+// ---------------- 树节点公共工具 ----------------
+function isRootNode(n: TreeNode) {
+  return n.parentId === n.id;
+}
+
+function findItem(id: number, items: NodeItem[] = treeData.value): NodeItem | undefined {
+  for (const it of items) {
+    if (it.node.id === id) return it;
+    const found = findItem(id, it.children);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function collectSubtree(id: number, out: Set<number>) {
+  const item = findItem(id);
+  if (!item) return;
+  const walk = (it: NodeItem) => {
+    out.add(it.node.id);
+    it.children.forEach(walk);
+  };
+  walk(item);
+}
+
+function bookmarkIdsUnder(id: number): number[] {
+  const out: number[] = [];
+  const walk = (it: NodeItem) => {
+    if (it.node.kind === "bookmark") out.push(it.node.id);
+    it.children.forEach(walk);
+  };
+  const item = findItem(id);
+  if (item) walk(item);
+  return out;
+}
+
+function rootFolderId(): number | null {
+  return store.nodes.find((n) => n.kind === "folder" && isRootNode(n))?.id ?? null;
+}
+
 // ---------------- 拖拽移动 ----------------
+const dragIds = ref<number[]>([]);
+const forbiddenDropIds = ref<Set<number>>(new Set());
+
+function onTreeDragStart({ node }: { node: TreeOption }) {
+  const id = (node as NodeItem).node.id;
+  // 拖拽已勾选的节点时，连同其他勾选节点一起移动
+  dragIds.value =
+    store.checkedIds.length > 0 && store.checkedIds.includes(id)
+      ? [...store.checkedIds]
+      : [id];
+  const forbidden = new Set<number>();
+  for (const dragId of dragIds.value) collectSubtree(dragId, forbidden);
+  forbiddenDropIds.value = forbidden;
+}
+
+function onTreeDragEnd() {
+  dragIds.value = [];
+  forbiddenDropIds.value = new Set();
+}
+
 function allowDrop({
   dropPosition,
   node,
@@ -306,6 +424,7 @@ function allowDrop({
   node: TreeOption;
 }) {
   const item = node as NodeItem;
+  if (forbiddenDropIds.value.has(item.node.id)) return false;
   if (dropPosition === "inside") return item.node.kind === "folder";
   return true;
 }
@@ -319,16 +438,18 @@ async function handleDrop({
   dragNode: TreeOption;
   dropPosition: "before" | "after" | "inside";
 }) {
-  const dragId = dragNode.key as number;
+  const dragId = (dragNode as NodeItem).node.id;
+  const ids = dragIds.value.includes(dragId) ? [...dragIds.value] : [dragId];
   const target = node as NodeItem;
-  const ids =
-    store.checkedIds.length > 0 && store.checkedIds.includes(dragId)
-      ? [...store.checkedIds]
-      : [dragId];
+  if (ids.some((id) => forbiddenDropIds.value.has(target.node.id))) {
+    message.warning(t("moveErrorOwnSubtree"));
+    onTreeDragEnd();
+    return;
+  }
   let targetId: number;
   let index: number;
   if (dropPosition === "inside") {
-    targetId = target.key as number;
+    targetId = target.node.id;
     index = 99999; // 追加到末尾（后端会做范围裁剪）
   } else {
     targetId = target.node.parentId;
@@ -341,6 +462,157 @@ async function handleDrop({
     await store.refresh();
   } catch (e) {
     message.error(String(e));
+  } finally {
+    onTreeDragEnd();
+  }
+}
+
+// ---------------- 右键菜单 ----------------
+type CtxOption = { label: string; key: string; disabled?: boolean };
+
+const ctxMenu = reactive({ show: false, x: 0, y: 0, node: null as TreeNode | null });
+
+function onDocClick() {
+  if (ctxMenu.show) ctxMenu.show = false;
+}
+
+function treeNodeProps({ option }: { option: TreeOption }) {
+  return {
+    onContextmenu: (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      ctxMenu.node = (option as NodeItem).node;
+      ctxMenu.x = e.clientX;
+      ctxMenu.y = e.clientY;
+      ctxMenu.show = true;
+    },
+  };
+}
+
+const ctxOptions = computed<CtxOption[]>(() => {
+  const node = ctxMenu.node;
+  if (!node) return [];
+  const root = isRootNode(node);
+  const opts: CtxOption[] = [];
+  if (node.kind === "bookmark") {
+    opts.push({ label: t("ctxOpen"), key: "open" });
+  } else {
+    opts.push({ label: t("ctxNewChild"), key: "newChild" });
+  }
+  opts.push({ label: t("ctxCheck"), key: "check" });
+  opts.push({ label: t("ctxMove"), key: "move", disabled: root });
+  opts.push({ label: t("ctxDelete"), key: "delete", disabled: root });
+  return opts;
+});
+
+function contextIds(node: TreeNode): number[] {
+  if (store.checkedIds.length > 1 && store.checkedIds.includes(node.id)) {
+    return store.checkedIds.filter((id) => {
+      const n = store.nodeById(id);
+      return n != null && !isRootNode(n);
+    });
+  }
+  return [node.id];
+}
+
+async function onCtxSelect(key: string) {
+  const node = ctxMenu.node;
+  ctxMenu.show = false;
+  if (!node) return;
+  switch (key) {
+    case "open":
+      await openBookmark(node);
+      break;
+    case "check": {
+      const ids = node.kind === "bookmark" ? [node.id] : bookmarkIdsUnder(node.id);
+      if (ids.length === 0) {
+        message.info(t("checkNothing"));
+        break;
+      }
+      try {
+        const total = await store.startCheck("selected", ids);
+        message.info(total > 0 ? t("checkStarted", { n: total }) : t("checkNothing"));
+      } catch (e) {
+        message.error(`${t("opFailed")}: ${e}`);
+      }
+      break;
+    }
+    case "newChild":
+      openCreateFolder(node.id);
+      break;
+    case "move":
+      openMoveModal(contextIds(node), node.parentId);
+      break;
+    case "delete":
+      openDeleteModal(contextIds(node));
+      break;
+  }
+}
+
+// 右键「移动到…」
+const showMoveModal = ref(false);
+const moveIds = ref<number[]>([]);
+const moveTargetId = ref<number | null>(null);
+const moving = ref(false);
+
+const moveOptions = computed(() => {
+  const forbidden = new Set<number>();
+  for (const id of moveIds.value) collectSubtree(id, forbidden);
+  return folderOptions.value.filter((o) => !forbidden.has(o.value as number));
+});
+
+function openMoveModal(ids: number[], defaultTarget: number) {
+  moveIds.value = ids;
+  moveTargetId.value = folderOptions.value.some((o) => o.value === defaultTarget)
+    ? defaultTarget
+    : (rootFolderId() ?? (folderOptions.value[0]?.value as number | undefined) ?? null);
+  showMoveModal.value = true;
+}
+
+async function doMove() {
+  if (moveTargetId.value == null) {
+    message.warning(t("moveNoTarget"));
+    return;
+  }
+  moving.value = true;
+  try {
+    await api.moveNodes(moveIds.value, moveTargetId.value, 99999);
+    showMoveModal.value = false;
+    message.success(t("movedOk", { n: moveIds.value.length }));
+    store.checkedIds = [];
+    await store.refresh();
+  } catch (e) {
+    message.error(`${t("opFailed")}: ${e}`);
+  } finally {
+    moving.value = false;
+  }
+}
+
+// 右键「删除」
+const showDeleteModal = ref(false);
+const deleteIds = ref<number[]>([]);
+const deleting = ref(false);
+const deleteNames = computed(() =>
+  deleteIds.value.map((id) => store.nodeById(id)?.title ?? `#${id}`)
+);
+
+function openDeleteModal(ids: number[]) {
+  deleteIds.value = ids;
+  showDeleteModal.value = true;
+}
+
+async function doDelete() {
+  deleting.value = true;
+  try {
+    const n = await api.deleteNodes(deleteIds.value);
+    showDeleteModal.value = false;
+    message.success(t("deletedOk", { n }));
+    store.checkedIds = [];
+    await store.refresh();
+  } catch (e) {
+    message.error(`${t("opFailed")}: ${e}`);
+  } finally {
+    deleting.value = false;
   }
 }
 
@@ -469,14 +741,23 @@ const folderOptions = computed(() => {
     .sort((a, b) => String(a.label).localeCompare(String(b.label)));
 });
 
-function openCreateFolder() {
+const parentFolderName = computed(() => {
+  const found = folderOptions.value.find((o) => o.value === createParentId.value);
+  return found ? String(found.label) : "";
+});
+
+function openCreateFolder(parentId?: number) {
   newFolderName.value = "";
-  // 默认父目录：优先当前勾选的第一个文件夹，否则根目录
-  const checkedFolder = store.checkedIds
-    .map((id) => store.nodeById(id))
-    .find((n) => n && n.kind === "folder");
-  const root = store.nodes.find((n) => n.kind === "folder" && n.parentId === n.id);
-  createParentId.value = checkedFolder?.id ?? root?.id ?? null;
+  if (parentId != null) {
+    // 右键文件夹时直接以它为父目录，免去再选一次
+    createParentId.value = parentId;
+  } else {
+    // 工具栏入口：默认父目录优先当前勾选的第一个文件夹，否则根目录
+    const checkedFolder = store.checkedIds
+      .map((id) => store.nodeById(id))
+      .find((n) => n && n.kind === "folder");
+    createParentId.value = checkedFolder?.id ?? rootFolderId() ?? null;
+  }
   showCreateFolder.value = true;
 }
 
@@ -506,6 +787,7 @@ async function doCreateFolder() {
 // ---------------- 事件监听 ----------------
 let unlisten: UnlistenFn[] = [];
 onMounted(async () => {
+  document.addEventListener("click", onDocClick);
   await store.refresh();
   unlisten.push(
     await listen<CheckProgressEvent>("check://progress", (e) => {
@@ -528,6 +810,7 @@ onMounted(async () => {
   );
 });
 onUnmounted(() => {
+  document.removeEventListener("click", onDocClick);
   unlisten.forEach((f) => f());
 });
 </script>
@@ -585,6 +868,20 @@ onUnmounted(() => {
   padding: 6px 4px;
   font-size: 12px;
   opacity: 0.75;
+}
+.create-hint,
+.delete-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+.delete-list {
+  margin: 0;
+  padding-left: 20px;
+  max-height: 260px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.8;
 }
 .check-panel {
   flex: 1;

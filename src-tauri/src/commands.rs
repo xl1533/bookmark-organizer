@@ -276,6 +276,13 @@ pub async fn delete_empty_folders(state: State<'_, AppState>, ids: Vec<NodeId>) 
     store.soft_delete(&ids).map_err(es)
 }
 
+/// 手动删除选中的书签/文件夹（软删除进入回收站，可恢复）。
+#[tauri::command]
+pub async fn delete_nodes(state: State<'_, AppState>, ids: Vec<NodeId>) -> Result<usize, String> {
+    let mut store = state.store.lock().unwrap();
+    store.soft_delete(&ids).map_err(es)
+}
+
 // ---------------------------------------------------------------------------
 // 去重
 // ---------------------------------------------------------------------------

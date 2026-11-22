@@ -34,6 +34,7 @@ pub fn run() {
             commands::create_folder,
             commands::find_empty_folders,
             commands::delete_empty_folders,
+            commands::delete_nodes,
             commands::dedup_preview,
             commands::dedup_apply,
             commands::start_check,

@@ -26,6 +26,7 @@ export const api = {
     invoke("move_nodes", { ids, targetId, index }),
   createFolder: (parentId: number, title: string, index: number): Promise<number> =>
     invoke("create_folder", { parentId, title, index }),
+  deleteNodes: (ids: number[]): Promise<number> => invoke("delete_nodes", { ids }),
 
   // 用系统默认浏览器打开链接
   openUrl: (url: string): Promise<void> => tauriOpenUrl(url),
