@@ -1022,10 +1022,10 @@ fn direct_child_ids(tx: &rusqlite::Transaction<'_>, parent: NodeId) -> CoreResul
     let mut stmt = tx.prepare(
         "SELECT id FROM nodes WHERE parent_id = ?1 AND deleted = 0 ORDER BY position, id",
     )?;
-    let ids: Vec<NodeId> = stmt
-        .query_map(params![parent], |r| r.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
+    let mut ids: Vec<NodeId> = Vec::new();
+    for row in stmt.query_map(params![parent], |r| r.get(0))? {
+        ids.push(row?);
+    }
     Ok(ids)
 }
 
@@ -1051,48 +1051,51 @@ fn is_ancestor_in_tx(
     Ok(false)
 }
 
+/// 读取节点类型与标题；类型统一经 `NodeKind::from_str` 归一化。
+fn node_kind_and_title(
+    tx: &rusqlite::Transaction<'_>,
+    id: NodeId,
+) -> CoreResult<Option<(NodeKind, String)>> {
+    let raw: Option<(String, String)> = tx
+        .query_row("SELECT kind, title FROM nodes WHERE id = ?1", params![id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?;
+    Ok(raw.map(|(kind, title)| (NodeKind::from_str(&kind), title)))
+}
+
 /// 递归合并一个被合并文件夹到保留文件夹：
-/// 普通子节点按原顺序追加；同名子文件夹继续递归；最后软删除空的壳文件夹。
+/// 普通子节点按原顺序追加；同名子文件夹继续递归；最后无条件软删除空的壳文件夹。
 fn merge_one_folder_in_tx(
     tx: &rusqlite::Transaction<'_>,
     keep_id: NodeId,
     merge_id: NodeId,
     outcome: &mut MergeOutcome,
 ) -> CoreResult<()> {
-    let mut keep_folders: HashMap<String, NodeId> = HashMap::new();
+    // 保留项当前的直接子文件夹：(id, 规范化标题)。用线性匹配而非 HashMap 查找，
+    // 保证 trim + 大小写不敏感的比较口径与预览分组完全一致。
+    let mut keep_folders: Vec<(NodeId, String)> = Vec::new();
     for id in direct_child_ids(tx, keep_id)? {
-        let info: Option<(String, String)> = tx
-            .query_row("SELECT kind, title FROM nodes WHERE id = ?1", params![id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .optional()?;
-        if let Some((kind, title)) = info {
-            if kind == "folder" {
-                keep_folders.insert(title.trim().to_lowercase(), id);
+        if let Some((kind, title)) = node_kind_and_title(tx, id)? {
+            if kind == NodeKind::Folder {
+                keep_folders.push((id, title.trim().to_lowercase()));
             }
         }
     }
 
     let mut plain_ids: Vec<NodeId> = Vec::new();
     let mut same_name_pairs: Vec<(NodeId, NodeId)> = Vec::new();
-    // 同名子文件夹若因祖先关系无法递归合并，则保留壳文件夹，绝不软删除丢数据。
-    let mut skipped_pairs = 0usize;
     for id in direct_child_ids(tx, merge_id)? {
-        let info: Option<(String, String)> = tx
-            .query_row("SELECT kind, title FROM nodes WHERE id = ?1", params![id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
-            .optional()?;
-        match info {
-            Some((kind, title)) if kind == "folder" => {
+        match node_kind_and_title(tx, id)? {
+            Some((NodeKind::Folder, title)) => {
                 let key = title.trim().to_lowercase();
-                if let Some(&target) = keep_folders.get(&key) {
+                if let Some((target, _)) = keep_folders.iter().find(|(_, k)| k == &key) {
                     // 同名子文件夹：不搬整个文件夹，只递归搬其子节点，避免重复层级
-                    same_name_pairs.push((target, id));
+                    same_name_pairs.push((*target, id));
                 } else {
                     plain_ids.push(id);
                     // 同一被合并文件夹内出现多个同名子文件夹时，后续者合并进前者
-                    keep_folders.insert(key, id);
+                    keep_folders.push((id, key));
                 }
             }
             Some(_) => plain_ids.push(id),
@@ -1106,15 +1109,24 @@ fn merge_one_folder_in_tx(
         outcome.moved_nodes += plain_ids.len();
     }
     for (target, source) in same_name_pairs {
-        if target != source && !is_ancestor_in_tx(tx, source, target)? {
-            merge_one_folder_in_tx(tx, target, source, outcome)?;
-        } else {
-            skipped_pairs += 1;
+        if target == source || is_ancestor_in_tx(tx, source, target)? {
+            // 目标位于源子树内：不能递归，走下方兜底迁移，绝不丢节点。
+            continue;
         }
+        merge_one_folder_in_tx(tx, target, source, outcome)?;
     }
-    // 子节点已全部迁出，软删除空壳文件夹（进回收站，不裸删节点）
-    if skipped_pairs == 0 {
-        let _ = soft_delete_in_tx(tx, &[merge_id])?;
+
+    // 关键不变量：被合并文件夹迁空后必须消失，不再由任何条件分支跳过。
+    // 若仍有存活子节点（异常/祖先冲突路径），先按原顺序迁到保留项末尾，再删空壳。
+    let remaining = direct_child_ids(tx, merge_id)?;
+    if !remaining.is_empty() {
+        let at = direct_child_ids(tx, keep_id)?.len() as i64;
+        move_nodes_in_tx(tx, &remaining, keep_id, at)?;
+        outcome.moved_nodes += remaining.len();
+    }
+    let removed = soft_delete_in_tx(tx, &[merge_id])?;
+    if removed == 0 {
+        return Err(crate::CoreError::Other(format!("合并后未能软删除空壳文件夹 {merge_id}")));
     }
     Ok(())
 }
@@ -1235,10 +1247,10 @@ fn subtree_impl(
         ) SELECT id FROM sub"
     );
     let mut stmt = tx.prepare(&sql)?;
-    let ids: Vec<NodeId> = stmt
-        .query_map(params![root], |r| r.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
+    let mut ids: Vec<NodeId> = Vec::new();
+    for row in stmt.query_map(params![root], |r| r.get(0))? {
+        ids.push(row?);
+    }
     Ok(ids)
 }
 
@@ -1505,5 +1517,8 @@ mod tests {
             .filter(|n| n.parent_id == ui_folders[0].id && !n.deleted)
             .collect();
         assert_eq!(ui_children.len(), 2);
+        let two = nodes.iter().find(|n| n.title == "two").unwrap();
+        assert_eq!(two.parent_id, ui_folders[0].id);
+        assert_eq!(store.list_trash().unwrap().len(), 2);
     }
 }
