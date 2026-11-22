@@ -51,12 +51,11 @@ pub struct Stats {
     pub trash_count: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// #11 增量检测计划：待检测目标 + 四类原因计数。
 ///
-    /// 计数口径（与第 1 期全量检测共用 `dfs_bookmarks()` 作用域，即有 URL 的存活书签；
-    /// 每本只落入一类，四类之和 = 该作用域总数，与预览 UI 自洽）：
-    /// - 优先级 `新增 > URL 变更 > 超期 > 跳过`；
+/// 计数口径（与第 1 期全量检测共用 `dfs_bookmarks()` 作用域，即有 URL 的存活书签；
+/// 每本只落入一类，四类之和 = 该作用域总数，与预览 UI 自洽）：
+/// - 优先级 `新增 > URL 变更 > 超期 > 跳过`；
 /// - 同时命中「URL 变更 + 超期」时计入 `url_changed_count`（变更语义更强，重检一次即可）；
 /// - 非 HTTP 协议（javascript:/mailto:/chrome:/place: 等）按第 1 期规则永不入队，计入 `skipped_count`；
 /// - 恒等式：`targets.len() == new_count + url_changed_count + stale_count == 总数 - skipped_count`。
