@@ -103,7 +103,7 @@ bookmark-organizer/
 进入仓库 **Actions → Build Windows EXE → Artifacts**，下载 `BookmarkOrganizer-windows`，包含：
 
 - `bookmark-organizer.exe` —— 免安装单文件（WebView2 使用 Windows 10/11 系统组件）
-- `BookmarkOrganizer_0.1.0_x64-setup.exe` —— NSIS 安装包（可选）
+- `BookmarkOrganizer_1.0.0_x64-setup.exe` —— NSIS 安装包（可选）
 
 首次运行时若提示缺少 WebView2，安装包模式会自动下载安装运行时。
 

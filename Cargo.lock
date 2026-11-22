@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "bookmark-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "futures",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "bookmark-organizer"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bookmark-core",
  "chrono",
