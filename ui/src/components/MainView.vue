@@ -35,6 +35,7 @@
             checkable
             cascade
             draggable
+            virtual-scroll
             :data="treeData"
             :pattern="pattern"
             :checked-keys="store.checkedIds"
@@ -43,6 +44,7 @@
             :render-suffix="renderSuffix"
             :render-label="renderLabel"
             :expand-on-click="false"
+            style="height: 100%"
             key-field="key"
             label-field="label"
             children-field="children"

@@ -14,6 +14,7 @@ fn opts(timeout: u64, retries: u32, concurrency: usize, proxy: Option<String>) -
         timeout_secs: timeout,
         retries,
         concurrency,
+        per_host_concurrency: 2,
         proxy,
         user_agent: "BookmarkOrganizer-Test/0.1".into(),
     }

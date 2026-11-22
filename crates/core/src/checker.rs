@@ -6,21 +6,23 @@
 //! - HTTP 401/403/429 判「可疑」（登录墙 / 风控 / Cloudflare 拦截，浏览器可访问，
 //!   直接判失效有误删风险）；其余 4xx/5xx、DNS 失败、连接/读取超时判「失效」
 //! - 连接与整体超时 10 秒；失败（网络错误与 5xx）重试 2 次，退避 400ms×次数
-//! - 并发上限默认 8，通过令牌桶（Semaphore）控制
+//!   退避等待可被取消打断，点「停止」后立即响应
+//! - 全局并发上限默认 8（Semaphore），同一 host 并发上限默认 2，避免集中请求少数站点触发风控
 //! - 记录最终 URL（跟随重定向），供第 2 期「重定向链接自动更新」使用
 //!
 //! 判定局限（UI 中需注明）：HTTP 检测无法识别 Cloudflare 拦截页和 SPA 假 200，
 //! 属尽力检测。
 
+use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use serde::Serialize;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 use crate::NodeId;
 
@@ -74,8 +76,10 @@ pub struct CheckOptions {
     pub timeout_secs: u64,
     /// 失败重试次数，默认 2（总尝试 = 1 + retries）
     pub retries: u32,
-    /// 并发上限，默认 8
+    /// 全局并发上限，默认 8
     pub concurrency: usize,
+    /// 同一 host 的并发上限，默认 2（防止集中请求少数站点触发对方风控）
+    pub per_host_concurrency: usize,
     /// HTTP 代理，如 http://host:port 或 http://user:pass@host:port 或 socks5://...
     pub proxy: Option<String>,
     pub user_agent: String,
@@ -87,13 +91,40 @@ impl Default for CheckOptions {
             timeout_secs: 10,
             retries: 2,
             concurrency: 8,
+            per_host_concurrency: 2,
             proxy: None,
             user_agent: "Mozilla/5.0 (compatible; BookmarkOrganizer/0.1; +link-check)".to_string(),
         }
     }
 }
 
+/// 从 URL 取出 host（小写），用于同域限流；解析失败用整串兜底。
+fn host_of(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+        .unwrap_or_else(|| url.to_lowercase())
+}
+
 const MAX_REDIRECTS: usize = 10;
+
+/// 可被取消打断的退避等待：每 50ms 检查一次 cancel，取消后立即返回 true。
+/// 避免"停止检测"后还要等完 400/800ms 退避的尾巴。
+async fn cancellable_sleep(backoff: Duration, cancel: &AtomicBool) -> bool {
+    let step = Duration::from_millis(50);
+    let mut remaining = backoff;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return true;
+        }
+        if remaining.is_zero() {
+            return false;
+        }
+        let wait = remaining.min(step);
+        tokio::time::sleep(wait).await;
+        remaining = remaining.saturating_sub(wait);
+    }
+}
 
 pub struct LinkChecker {
     client: reqwest::Client,
@@ -136,28 +167,42 @@ impl LinkChecker {
         let client = self.client.clone();
 
         tokio::spawn(async move {
-            let in_flight = Arc::new(AtomicUsize::new(0));
+            // 同域限流：每个 host 一个信号量，按需创建并在整个检测周期复用。
+            // 全局并发由 semaphore 控制，同域并发由这里的 per-host 信号量控制。
+            let host_sems: Arc<Mutex<HashMap<String, Arc<Semaphore>>>> =
+                Arc::new(Mutex::new(HashMap::new()));
+            let per_host = opts.per_host_concurrency.max(1);
+
             let mut stream = futures::stream::iter(targets)
                 .map(|target| {
                     let permit_sem = semaphore.clone();
+                    let host_sems = host_sems.clone();
                     let client = client.clone();
                     let tx = tx.clone();
                     let cancel = cancel.clone();
-                    let in_flight = in_flight.clone();
                     let opts = opts.clone();
                     async move {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
-                        // 在任务内获取许可，保证同时在网的请求 ≤ concurrency
+                        // 全局许可：保证同时在网的请求 ≤ concurrency
                         let _permit = permit_sem.acquire_owned().await;
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
-                        let cur = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        // 同域许可：保证同一 host 同时在途 ≤ per_host_concurrency
+                        let host = host_of(&target.url);
+                        let host_sem = {
+                            let mut map = host_sems.lock().await;
+                            map.entry(host)
+                                .or_insert_with(|| Arc::new(Semaphore::new(per_host)))
+                                .clone()
+                        };
+                        let _host_permit = host_sem.acquire_owned().await;
+                        if cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
                         let result = check_one(&client, &target, &opts, &cancel).await;
-                        in_flight.fetch_sub(1, Ordering::SeqCst);
-                        let _ = cur;
                         if let Some(result) = result {
                             let _ = tx.send(result).await;
                         }
@@ -246,8 +291,7 @@ async fn check_one(
         }
         if attempt > 0 {
             let backoff = Duration::from_millis(400 * attempt as u64);
-            tokio::time::sleep(backoff).await;
-            if cancel.load(Ordering::Relaxed) {
+            if cancellable_sleep(backoff, cancel).await {
                 return None;
             }
         }
@@ -369,5 +413,27 @@ mod tests {
         assert!(should_retry_code(503));
         assert!(should_retry_code(408));
         assert!(!should_retry_code(404));
+    }
+
+    #[test]
+    fn test_host_of() {
+        assert_eq!(host_of("https://www.Example.com/a?b=1"), "www.example.com");
+        assert_eq!(host_of("http://example.com:8080/p"), "example.com");
+        // 解析失败用整串兜底
+        assert_eq!(host_of("not a url"), "not a url");
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_sleep() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        // 未取消：等满后返回 false
+        let started = Instant::now();
+        assert!(!cancellable_sleep(Duration::from_millis(120), &cancel).await);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        // 取消：立即返回 true（提前置位）
+        cancel.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        assert!(cancellable_sleep(Duration::from_secs(10), &cancel).await);
+        assert!(started.elapsed() < Duration::from_millis(200));
     }
 }

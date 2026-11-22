@@ -179,6 +179,7 @@ async fn full_acceptance_scenario() {
         timeout_secs: 1, // 测试加速；生产默认 10
         retries: 0,      // 测试加速；生产默认 2
         concurrency: 8,
+        per_host_concurrency: 2,
         proxy: None,
         user_agent: "BookmarkOrganizer-Test/0.1".into(),
     };
