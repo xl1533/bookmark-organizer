@@ -46,7 +46,7 @@ pub struct TreeNodeDto {
     pub check: Option<CheckDto>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemDto {
     pub id: NodeId,
