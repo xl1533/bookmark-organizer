@@ -25,6 +25,10 @@ on:
       - "*.md"
   workflow_dispatch:
 
+# 发布 Release 需要 GITHUB_TOKEN 具备 contents: write 权限
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
