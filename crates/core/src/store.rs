@@ -1499,10 +1499,12 @@ mod tests {
         store.import_children(&tree, ImportMode::Replace).unwrap();
 
         let groups = store.merge_folder_groups().unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].folder_ids.len(), 2);
-        let keep = groups[0].suggested_keep_id;
-        let merge = groups[0].folder_ids[1];
+        // DFS 遍历所有层级：Dev/dev 与嵌套的 UI/ui 各自成组，共 2 组。
+        assert_eq!(groups.len(), 2);
+        let dev_group = groups.iter().find(|g| g.key == "dev").unwrap();
+        assert_eq!(dev_group.folder_ids.len(), 2);
+        let keep = dev_group.suggested_keep_id;
+        let merge = dev_group.folder_ids.iter().copied().find(|&id| id != keep).unwrap();
         let outcome = store.merge_folders(&[(keep, vec![merge])]).unwrap();
         assert_eq!(outcome.moved_nodes, 1);
 
