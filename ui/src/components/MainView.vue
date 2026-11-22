@@ -200,6 +200,7 @@ import {
   NSelect,
   NSpace,
   NTag,
+  NTooltip,
   NTree,
   useMessage,
   type TreeOption,
@@ -258,11 +259,11 @@ const STATUS_TAG: Record<string, { text: () => string; type: "success" | "warnin
   dead: { text: () => t("statusDead"), type: "error" },
 };
 
-function statusTag(status: string, count?: number, key?: number) {
+function statusTag(status: string, count?: number, key?: number, detail?: string) {
   const conf = STATUS_TAG[status];
   if (!conf) return null;
   const label = count == null ? conf.text() : `${conf.text()} ${count}`;
-  return h(
+  const tag = h(
     NTag,
     {
       size: "tiny",
@@ -273,6 +274,29 @@ function statusTag(status: string, count?: number, key?: number) {
     },
     { default: () => label }
   );
+  // 书签状态附详情提示（状态码 + 原因），帮助用户判断可疑/失效的具体原因
+  if (detail) {
+    return h(
+      NTooltip,
+      { placement: "top", style: "margin-left: 8px" },
+      {
+        trigger: () => tag,
+        default: () => detail,
+      }
+    );
+  }
+  return tag;
+}
+
+// 从检测结果提取状态详情文本（HTTP 状态码 + 原因）
+function checkDetail(node: TreeNode): string | undefined {
+  const c = node.check;
+  if (!c) return undefined;
+  const parts: string[] = [];
+  if (c.httpCode != null) parts.push(`HTTP ${c.httpCode}`);
+  if (c.message) parts.push(c.message);
+  if (c.finalUrl && c.finalUrl !== node.url) parts.push(`→ ${c.finalUrl}`);
+  return parts.length ? parts.join(" · ") : undefined;
 }
 
 // 点击书签名称用默认浏览器打开；文件夹名称保持普通文本（点击仅展开）
@@ -310,7 +334,7 @@ function renderSuffix({ option }: { option: TreeOption }) {
   const item = option as NodeItem;
   if (item.node.kind === "bookmark") {
     const st = store.effectiveStatus(item.node);
-    return st ? statusTag(st) : null;
+    return st ? statusTag(st, undefined, undefined, checkDetail(item.node)) : null;
   }
   // 文件夹：聚合子树内各状态数量，便于在树中一眼看到检测结果
   const counts = subtreeStatusCounts(item);

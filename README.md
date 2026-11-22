@@ -3,7 +3,7 @@
 基于 **Rust 核心 + Tauri 2** 的本地书签整理工具。导入浏览器收藏夹（Chrome / Edge / Firefox 导出的
 Netscape HTML），在树形视图中整理、去重、检测链接有效性，并安全删除失效项（自动备份 + 回收站可撤销）。
 
-> 第 1 期（MVP）8 项、第 2 期 6 项功能均已完成；第 3 期见文末路线图。本工具**完全本地运行**，不执行网页 JS、不提交任何数据、不上传书签（WebDAV 除外，且完全由你主动触发）。
+> 第 1 期（MVP）8 项、第 2 期 6 项功能均已完成；后续方向见 [ROADMAP.md](ROADMAP.md)。本工具**完全本地运行**，不执行网页 JS、不提交任何数据、不上传书签（WebDAV 除外，且完全由你主动触发）。
 
 ---
 
@@ -107,35 +107,41 @@ bookmark-organizer/
 
 首次运行时若提示缺少 WebView2，安装包模式会自动下载安装运行时。
 
-> 仅修改文档（如本 README）也会触发一次完整构建——这是当前工作流的既有行为。
+> 仅修改文档（README / ROADMAP / docs）不会触发构建——工作流已配置 `paths-ignore` 过滤。
 
 ### 方式二：本地开发
 
 环境要求：Rust stable（MSVC）、Node.js ≥ 20、Windows 10/11（或 Linux + webkit2gtk-4.1）。
 
+**用封装脚本（推荐）**——脚本会自动设置 `TAURI_APP_PATH` 并在首次运行时安装前端依赖，无需手动配置：
+
 ```bash
-# 1. 安装前端依赖
-cd ui
-npm install
-
-# 2. 告诉 Tauri CLI 项目目录的位置（重要！）
-#    Tauri CLI 只会在「当前目录及其子目录」里查找 tauri.conf.json，
-#    而本项目 src-tauri/ 与 ui/ 是兄弟目录，必须用 TAURI_APP_PATH 指定：
-# PowerShell：
-$env:TAURI_APP_PATH = "$PWD\..\src-tauri"
-# bash：
-export TAURI_APP_PATH="$PWD/../src-tauri"
-
-# 3. 开发模式（Vite 热更新）
-npm run dev          # 仅前端调试（浏览器打开，invoke 不可用）
-npx tauri dev        # 完整桌面应用调试
-
-# 4. 构建发布版（产物：target/release/bookmark-organizer.exe + NSIS 安装包）
-npx tauri build
+# bash / Git Bash / macOS / Linux
+./build.sh dev       # 完整桌面应用（热更新）
+./build.sh ui        # 仅前端 Vite（浏览器调试）
+./build.sh build     # 构建发布版（exe + NSIS）
+./build.sh test      # core 单元测试
 ```
 
-> 若不设置 `TAURI_APP_PATH`，`npx tauri dev / build` 会报
-> `Couldn't recognize the current folder as a Tauri project`——CLI 在 `ui/` 下找不到 `tauri.conf.json`（它在兄弟目录 `src-tauri/` 里）。
+```powershell
+# Windows PowerShell
+.\build.ps1 dev
+.\build.ps1 build
+```
+
+> 为什么需要脚本：Tauri CLI 只在「当前目录及子目录」查找 `tauri.conf.json`，而本项目
+> `src-tauri/` 与 `ui/` 是兄弟目录，直接 `npx tauri dev/build` 会报
+> `Couldn't recognize the current folder as a Tauri project`。脚本帮你设好了 `TAURI_APP_PATH`。
+
+**手动方式**（等价于脚本做的事）：
+
+```bash
+cd ui && npm install
+export TAURI_APP_PATH="$PWD/../src-tauri"   # PowerShell: $env:TAURI_APP_PATH = "$PWD\..\src-tauri"
+npm run dev        # 仅前端
+npx tauri dev      # 完整应用
+npx tauri build    # 发布版
+```
 
 Linux 下编译 GUI 需要系统依赖：
 
