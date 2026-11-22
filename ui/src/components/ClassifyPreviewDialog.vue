@@ -141,8 +141,8 @@ async function load(): Promise<void> {
   loading.value = true;
   try {
     items.value = await api.classifyPreview(includeClassified.value, [...props.selectedIds]);
-    // 默认勾选全部无冲突项；用户可逐条取消，冲突项始终不勾选。
-    checkedIds.value = selectableIds.value;
+    // 默认不勾选，由用户显式选择要归类的项（冲突项始终不可勾选）。
+    checkedIds.value = [];
   } catch (e) {
     items.value = [];
     checkedIds.value = [];

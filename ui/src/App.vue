@@ -27,6 +27,7 @@ import {
   enUS,
   zhCN,
   type GlobalTheme,
+  type GlobalThemeOverrides,
 } from "naive-ui";
 import { storeToRefs } from "pinia";
 import { useAppStore } from "./stores/app";
@@ -48,16 +49,30 @@ const localeVal = computed(() => (locale.value === "zh" ? zhCN : enUS));
 const dateLocaleVal = computed(() => (locale.value === "zh" ? dateZhCN : dateEnUS));
 
 // 品牌色覆盖
-const overrides = computed(() => ({
+const overrides = computed<GlobalThemeOverrides>(() => ({
   common: {
     primary: "#2563eb",
     primaryHover: "#1d4ed8",
     primaryPressed: "#1e40af",
+    borderRadius: "6px",
+    borderRadiusSmall: "4px",
   },
 }));
 </script>
 
 <style>
+:root {
+  color-scheme: light;
+  --bo-space-sm: 8px;
+  --bo-space: 12px;
+  --bo-space-lg: 14px;
+  --bo-radius-sm: 6px;
+  --bo-radius: 8px;
+  --bo-border: rgba(128, 128, 128, 0.18);
+  --bo-surface-2: rgba(128, 128, 128, 0.06);
+  --bo-primary: #2563eb;
+  --bo-text-muted: #6b7280;
+}
 html,
 body,
 #app {
@@ -71,7 +86,14 @@ body {
   background: #ffffff;
   color: #303133;
 }
+.app-dark {
+  color-scheme: dark;
+  --bo-border: rgba(255, 255, 255, 0.16);
+  --bo-surface-2: rgba(255, 255, 255, 0.06);
+  --bo-text-muted: #9ca3af;
+}
 body:has(.app-dark) {
+  color-scheme: dark;
   background: #18181c;
   color: #e0e0e0;
 }

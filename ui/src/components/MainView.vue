@@ -1,39 +1,23 @@
 <template>
   <div class="main-view">
     <!-- 顶部工具栏 -->
-    <div class="toolbar">
-      <n-space :size="8" align="center" :wrap-item="false">
-        <n-dropdown :options="importOptions" trigger="click" @select="onImportSelect">
-          <n-button type="primary" ghost>{{ t("importMenu") }}</n-button>
-        </n-dropdown>
-        <n-button @click="onExport">{{ t("exportBtn") }}</n-button>
-        <n-button @click="openCreateFolder">{{ t("newFolder") }}</n-button>
-      </n-space>
-      <n-space :size="8" align="center" :wrap-item="false">
-        <n-button type="primary" :disabled="store.running" @click="checkAll">
-          {{ t("checkAll") }}
-        </n-button>
-        <n-button :disabled="store.running" @click="checkSelected">{{ t("checkSelected") }}</n-button>
-        <n-button :disabled="!store.running" type="warning" ghost @click="store.cancelCheck()">
-          {{ t("stopCheck") }}
-        </n-button>
-        <n-button :disabled="store.running" @click="onIncrementalCheck">
-          {{ t("incrementalCheck") }}
-        </n-button>
-      </n-space>
-      <n-space :size="8" align="center" :wrap-item="false">
-        <n-dropdown :options="organizeOptions" trigger="click" @select="onOrganizeSelect">
-          <n-button>{{ t("organizeTools") }}</n-button>
-        </n-dropdown>
-        <n-button @click="openDedup">{{ t("dedup") }}</n-button>
-        <n-button @click="openEmpty">{{ t("emptyFolders") }}</n-button>
-        <n-button type="error" ghost @click="openDead">{{ t("deleteDead") }}</n-button>
-        <n-badge :value="store.stats?.trashCount ?? 0" :max="99">
-          <n-button @click="showTrash = true">{{ t("trash") }}</n-button>
-        </n-badge>
-        <n-button @click="showSettings = true">{{ t("settings") }}</n-button>
-      </n-space>
-    </div>
+    <MainToolbar
+      :running="store.running"
+      :trash-count="store.stats?.trashCount ?? 0"
+      @import-select="onImportSelect"
+      @export="onExport"
+      @create-folder="openCreateFolder"
+      @check-all="checkAll"
+      @check-selected="checkSelected"
+      @stop-check="store.cancelCheck()"
+      @incremental-check="onIncrementalCheck"
+      @organize-select="onOrganizeSelect"
+      @dedup="openDedup"
+      @empty="openEmpty"
+      @dead="openDead"
+      @trash="showTrash = true"
+      @settings="showSettings = true"
+    />
 
     <!-- 主体区域 -->
     <div class="body">
@@ -67,7 +51,12 @@
             @dragend="onTreeDragEnd"
             @drop="handleDrop"
           />
-          <div v-if="store.nodes.length === 0" class="empty-tip">{{ t("noBookmarks") }}</div>
+          <div v-if="store.nodes.length === 0" class="empty-tip">
+            <div class="empty-card">
+              <span class="empty-mark" aria-hidden="true"></span>
+              <span>{{ t("noBookmarks") }}</span>
+            </div>
+          </div>
         </div>
         <div class="checked-bar" v-if="store.checkedIds.length > 0">
           {{ t("checkedCount", { n: store.checkedIds.length }) }}
@@ -75,36 +64,15 @@
       </div>
 
       <!-- 检测面板 -->
-      <div class="check-panel">
-        <div class="panel-title">{{ t("checkProgressLabel") }}</div>
-        <n-progress
-          type="line"
-          :percentage="pct"
-          :processing="store.running"
-          :show-indicator="true"
-        />
-        <div class="counter-grid">
-          <div class="counter"><span class="dot ok"></span>{{ t("statOk") }} <b>{{ store.progress.ok }}</b></div>
-          <div class="counter"><span class="dot susp"></span>{{ t("statSuspicious") }} <b>{{ store.progress.suspicious }}</b></div>
-          <div class="counter"><span class="dot dead"></span>{{ t("statDead") }} <b>{{ store.progress.dead }}</b></div>
-          <div class="counter">{{ store.progress.done }} / {{ store.progress.total }}</div>
-        </div>
-        <div class="last-url" :title="store.lastUrl">{{ store.lastUrl }}</div>
-        <n-alert type="info" :bordered="false" class="disclaimer">{{ t("checkDisclaimer") }}</n-alert>
-      </div>
+      <CheckPanel
+        :running="store.running"
+        :progress="store.progress"
+        :last-url="store.lastUrl"
+      />
     </div>
 
     <!-- 底部状态栏 -->
-    <div class="status-bar">
-      <span>{{ t("statBookmarks") }} {{ store.stats?.bookmarks ?? "-" }}</span>
-      <span>{{ t("statFolders") }} {{ store.stats?.folders ?? "-" }}</span>
-      <span class="c-ok">{{ t("statOk") }} {{ store.stats?.ok ?? 0 }}</span>
-      <span class="c-susp">{{ t("statSuspicious") }} {{ store.stats?.suspicious ?? 0 }}</span>
-      <span class="c-dead">{{ t("statDead") }} {{ store.stats?.dead ?? 0 }}</span>
-      <span class="c-gray">{{ t("statUnchecked") }} {{ store.stats?.unchecked ?? 0 }}</span>
-      <span class="spacer"></span>
-      <span class="db" :title="store.dbPath">{{ t("dbPath") }}: {{ store.dbPath }}</span>
-    </div>
+    <StatusBar :stats="store.stats" :db-path="store.dbPath" />
 
     <!-- 对话框 -->
     <DedupDialog
@@ -221,15 +189,12 @@
 <script setup lang="ts">
 import { computed, h, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
-  NAlert,
-  NBadge,
   NButton,
   NDropdown,
   NForm,
   NFormItem,
   NInput,
   NModal,
-  NProgress,
   NSelect,
   NSpace,
   NTag,
@@ -258,6 +223,9 @@ import {
   isRootNode,
   rootFolderId,
 } from "../composables/tree";
+import MainToolbar from "./MainToolbar.vue";
+import CheckPanel from "./CheckPanel.vue";
+import StatusBar from "./StatusBar.vue";
 import DedupDialog from "./DedupDialog.vue";
 import EmptyFolderDialog from "./EmptyFolderDialog.vue";
 import DeadDialog from "./DeadDialog.vue";
@@ -624,11 +592,6 @@ async function doDelete() {
 }
 
 // ---------------- 导入 / 导出 ----------------
-const importOptions = computed(() => [
-  { label: t("importReplace"), key: "replace" },
-  { label: t("importAppend"), key: "append" },
-]);
-
 async function onImportSelect(mode: string) {
   const path = await openFileDialog({
     multiple: false,
@@ -660,12 +623,6 @@ async function onExport() {
 }
 
 // ---------------- 检测 ----------------
-const pct = computed(() =>
-  store.progress.total > 0
-    ? Math.round((store.progress.done / store.progress.total) * 100)
-    : 0
-);
-
 async function checkAll() {
   const total = await store.startCheck("all", []);
   if (total === 0) message.info(t("checkNothing"));
@@ -750,14 +707,6 @@ const showTrash = ref(false);
 const showSettings = ref(false);
 
 // ---------------- 整理工具下拉（T03 已接入模糊去重/合并文件夹） ----------------
-const organizeOptions = computed(() => [
-  { label: t("dedup"), key: "exactDedup" },
-  { label: t("fuzzyDedup"), key: "fuzzyDedup" },
-  { label: t("mergeFolders"), key: "mergeFolders" },
-  { label: t("updateRedirects"), key: "updateRedirects" },
-  { label: t("rulesClassify"), key: "rulesClassify" },
-]);
-
 function onOrganizeSelect(key: string) {
   if (key === "exactDedup") {
     void openDedup();
@@ -905,18 +854,6 @@ onUnmounted(() => {
   height: 100vh;
   overflow: hidden;
 }
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid rgba(128, 128, 128, 0.18);
-  flex-wrap: wrap;
-}
-.toolbar > :nth-child(2) {
-  flex: 1;
-  justify-content: center;
-}
 .body {
   flex: 1;
   display: flex;
@@ -927,30 +864,51 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding: 10px;
-  border-right: 1px solid rgba(128, 128, 128, 0.18);
-}
-.search {
-  margin-bottom: 8px;
+  gap: var(--bo-space-sm, 8px);
+  padding: var(--bo-space-lg, 10px);
+  border-right: 1px solid var(--bo-border, rgba(128, 128, 128, 0.18));
 }
 .tree-wrap {
   flex: 1;
   overflow: auto;
   position: relative;
+  border-radius: var(--bo-radius, 8px);
 }
 .empty-tip {
   position: absolute;
   top: 40px;
   left: 0;
   right: 0;
-  text-align: center;
-  opacity: 0.55;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.empty-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border: 1px dashed var(--bo-border, rgba(128, 128, 128, 0.28));
+  border-radius: var(--bo-radius, 8px);
+  background: var(--bo-surface-2, rgba(128, 128, 128, 0.05));
+  color: var(--bo-text-muted, inherit);
   font-size: 13px;
+  opacity: 0.9;
+}
+.empty-mark {
+  flex: none;
+  width: 10px;
+  height: 14px;
+  border-radius: 2px 2px 0 0;
+  background: var(--bo-primary, #2563eb);
+  opacity: 0.5;
 }
 .checked-bar {
-  padding: 6px 4px;
+  padding: 6px 10px;
+  border-radius: var(--bo-radius-sm, 6px);
+  background: var(--bo-surface-2, rgba(128, 128, 128, 0.08));
   font-size: 12px;
-  opacity: 0.75;
+  opacity: 0.85;
 }
 .create-hint,
 .delete-hint {
@@ -965,85 +923,5 @@ onUnmounted(() => {
   overflow: auto;
   font-size: 13px;
   line-height: 1.8;
-}
-.check-panel {
-  flex: 1;
-  min-width: 260px;
-  max-width: 420px;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.panel-title {
-  font-weight: 600;
-  font-size: 14px;
-}
-.counter-grid {
-  display: flex;
-  gap: 14px;
-  font-size: 13px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.counter b {
-  font-size: 15px;
-}
-.dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 5px;
-}
-.dot.ok {
-  background: #22c55e;
-}
-.dot.susp {
-  background: #f59e0b;
-}
-.dot.dead {
-  background: #ef4444;
-}
-.last-url {
-  font-size: 11px;
-  opacity: 0.6;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-height: 14px;
-}
-.disclaimer {
-  font-size: 12px;
-}
-.status-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 14px;
-  font-size: 12px;
-  border-top: 1px solid rgba(128, 128, 128, 0.18);
-  opacity: 0.85;
-}
-.status-bar .spacer {
-  flex: 1;
-}
-.status-bar .db {
-  max-width: 380px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.c-ok {
-  color: #22c55e;
-}
-.c-susp {
-  color: #f59e0b;
-}
-.c-dead {
-  color: #ef4444;
-}
-.c-gray {
-  opacity: 0.6;
 }
 </style>
