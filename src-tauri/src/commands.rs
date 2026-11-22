@@ -8,7 +8,9 @@ use bookmark_core::checker::{test_proxy as core_test_proxy, CheckOptions, CheckS
 use bookmark_core::dedup;
 use bookmark_core::model::{NewNode, Node, NodeKind, NodeId, ROOT_ID};
 use bookmark_core::netscape;
-use bookmark_core::store::{is_http_url, ImportMode, ImportStats, Stats, TrashEntry};
+use bookmark_core::store::{
+    is_http_url, ImportMode, ImportStats, MergeFolderGroup, MergeOutcome, Stats, TrashEntry,
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -18,6 +20,10 @@ use crate::state::{AppState, CheckRunHandle};
 fn es<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
+
+/// #9 模糊去重开关 DTO：直接复用 core 的 `FuzzyOptions`（serde camelCase + default）。
+/// 前端传入的四项开关原样交给 `find_duplicate_groups_with`，apply 不另读 settings。
+pub type FuzzyOptionsDto = bookmark_core::urlnorm::FuzzyOptions;
 
 // ---------------------------------------------------------------------------
 // DTO
@@ -59,6 +65,8 @@ pub struct ItemDto {
 #[serde(rename_all = "camelCase")]
 pub struct DupGroupDto {
     pub normalized_url: String,
+    /// 分组用哈希（严格 hash 仅用于 #11/#12，二者用途隔离）
+    pub hash: String,
     pub keep: ItemDto,
     pub duplicates: Vec<ItemDto>,
 }
@@ -443,18 +451,14 @@ pub async fn delete_nodes(state: State<'_, AppState>, ids: Vec<NodeId>) -> Resul
 // 去重
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-pub async fn dedup_preview(state: State<'_, AppState>) -> Result<Vec<DupGroupDto>, String> {
-    let store = state.store.lock().unwrap();
-    let dfs = store.dfs_bookmarks().map_err(es)?;
-    let groups = dedup::find_duplicate_groups(&dfs);
+/// 分组结果 → 前端 DTO（精确去重与模糊去重共用，保证字段一致）。
+fn dup_group_dtos(groups: Vec<dedup::DupGroup>, nodes: &[Node]) -> Vec<DupGroupDto> {
     if groups.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    let nodes = store.all_nodes().map_err(es)?;
     let node_map: HashMap<NodeId, Node> = nodes.iter().map(|n| (n.id, n.clone())).collect();
-    let paths = alive_paths(&nodes);
-    Ok(groups
+    let paths = alive_paths(nodes);
+    groups
         .into_iter()
         .filter_map(|g| {
             let keep = item_dto(g.keep_node_id, &node_map, &paths)?;
@@ -465,11 +469,21 @@ pub async fn dedup_preview(state: State<'_, AppState>) -> Result<Vec<DupGroupDto
                 .collect();
             Some(DupGroupDto {
                 normalized_url: g.normalized_url,
+                hash: g.hash,
                 keep,
                 duplicates,
             })
         })
-        .collect())
+        .collect()
+}
+
+#[tauri::command]
+pub async fn dedup_preview(state: State<'_, AppState>) -> Result<Vec<DupGroupDto>, String> {
+    let store = state.store.lock().unwrap();
+    let dfs = store.dfs_bookmarks().map_err(es)?;
+    let groups = dedup::find_duplicate_groups(&dfs);
+    let nodes = store.all_nodes().map_err(es)?;
+    Ok(dup_group_dtos(groups, &nodes))
 }
 
 #[tauri::command]
@@ -485,6 +499,96 @@ pub async fn dedup_apply(state: State<'_, AppState>) -> Result<usize, String> {
         return Ok(0);
     }
     store.soft_delete(&ids).map_err(es)
+}
+
+// ---------------------------------------------------------------------------
+// #9 模糊去重（preview / apply 使用前端传入的同一份 opts）
+// ---------------------------------------------------------------------------
+
+/// 按前端开关重算分组；`opts` 原样透传，后端不读取 settings。
+#[tauri::command]
+pub async fn fuzzy_dedup_preview(
+    state: State<'_, AppState>,
+    opts: FuzzyOptionsDto,
+) -> Result<Vec<DupGroupDto>, String> {
+    let store = state.store.lock().unwrap();
+    let dfs = store.dfs_bookmarks().map_err(es)?;
+    let groups = dedup::find_duplicate_groups_with(&dfs, opts);
+    let nodes = store.all_nodes().map_err(es)?;
+    Ok(dup_group_dtos(groups, &nodes))
+}
+
+/// 用与预览完全相同的 `opts` 重算分组并软删除重复项。
+/// 四个开关全关（STRICT）时，结果与第 1 期 `dedup_apply` 完全一致。
+#[tauri::command]
+pub async fn fuzzy_dedup_apply(
+    state: State<'_, AppState>,
+    opts: FuzzyOptionsDto,
+) -> Result<usize, String> {
+    let mut store = state.store.lock().unwrap();
+    let dfs = store.dfs_bookmarks().map_err(es)?;
+    let groups = dedup::find_duplicate_groups_with(&dfs, opts);
+    let ids: Vec<NodeId> = groups
+        .iter()
+        .flat_map(|g| g.duplicate_node_ids.iter().copied())
+        .collect();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    store.soft_delete(&ids).map_err(es)
+}
+
+// ---------------------------------------------------------------------------
+// #10 合并文件夹（preview / apply）
+// ---------------------------------------------------------------------------
+
+/// 同名文件夹分组预览：组名、成员路径、书签数、默认保留项（DFS 第一个）。
+#[tauri::command]
+pub async fn merge_folders_preview(state: State<'_, AppState>) -> Result<Vec<MergeGroupDto>, String> {
+    let store = state.store.lock().unwrap();
+    let groups = store.merge_folder_groups().map_err(es)?;
+    let nodes = store.all_nodes().map_err(es)?;
+    let node_map: HashMap<NodeId, Node> = nodes.iter().map(|n| (n.id, n.clone())).collect();
+    let paths = alive_paths(&nodes);
+    Ok(groups
+        .into_iter()
+        .map(|g: MergeFolderGroup| MergeGroupDto {
+            key: g.key,
+            folders: g
+                .folder_ids
+                .iter()
+                .filter_map(|id| item_dto(*id, &node_map, &paths))
+                .collect(),
+            total_bookmarks: g.total_bookmarks,
+            suggested_keep_id: g.suggested_keep_id,
+        })
+        .collect())
+}
+
+/// 应用合并：先生成 HTML 备份，再在 core 的单一事务内迁移子节点并软删除空壳。
+#[tauri::command]
+pub async fn merge_folders_apply(
+    state: State<'_, AppState>,
+    groups: Vec<MergeChoiceDto>,
+) -> Result<MergeResultDto, String> {
+    let backup_path = {
+        let store = state.store.lock().unwrap();
+        let dir = state.data_dir.join("backups");
+        bookmark_core::backup::create_backup(&store, &dir).map_err(es)?
+    };
+    let pairs: Vec<(NodeId, Vec<NodeId>)> = groups
+        .into_iter()
+        .map(|g| (g.keep_id, g.merge_ids))
+        .collect();
+    let outcome: MergeOutcome = {
+        let mut store = state.store.lock().unwrap();
+        store.merge_folders(&pairs).map_err(es)?
+    };
+    Ok(MergeResultDto {
+        backup_path: backup_path.display().to_string(),
+        merged_groups: outcome.merged_groups,
+        moved_nodes: outcome.moved_nodes,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -139,4 +139,39 @@ export async function setIncrementalDays(days: number): Promise<void> {
   await api.setSetting(INCREMENTAL_DAYS_KEY, String(safe));
 }
 
+/** #9 模糊去重开关默认值与 settings 键（PRD §5.1）。 */
+export const DEFAULT_FUZZY_OPTIONS: FuzzyOptions = {
+  ignoreQuery: false,
+  ignoreCase: true,
+  ignoreTrailingSlash: true,
+  ignoreFragment: true,
+};
+export const FUZZY_OPTIONS_KEY = "fuzzy_options";
+
+/** 读取开关；非法/缺失值回退默认值，并补齐缺失字段（与后端 serde(default) 对齐）。 */
+export async function getFuzzyOptions(): Promise<FuzzyOptions> {
+  try {
+    const raw = await api.getSetting(FUZZY_OPTIONS_KEY);
+    if (!raw || raw.trim() === "") return { ...DEFAULT_FUZZY_OPTIONS };
+    const parsed = JSON.parse(raw) as Partial<FuzzyOptions>;
+    const result = { ...DEFAULT_FUZZY_OPTIONS };
+    if (typeof parsed.ignoreQuery === "boolean") result.ignoreQuery = parsed.ignoreQuery;
+    if (typeof parsed.ignoreCase === "boolean") result.ignoreCase = parsed.ignoreCase;
+    if (typeof parsed.ignoreTrailingSlash === "boolean") result.ignoreTrailingSlash = parsed.ignoreTrailingSlash;
+    if (typeof parsed.ignoreFragment === "boolean") result.ignoreFragment = parsed.ignoreFragment;
+    return result;
+  } catch {
+    return { ...DEFAULT_FUZZY_OPTIONS };
+  }
+}
+
+/** 写入开关快照（仅本机 SQLite settings；预览与应用共用同一份 opts）。 */
+export async function setFuzzyOptions(opts: FuzzyOptions): Promise<void> {
+  try {
+    await api.setSetting(FUZZY_OPTIONS_KEY, JSON.stringify(opts));
+  } catch {
+    // 设置写入失败不应阻断预览/应用；下次打开仍可回退默认值。
+  }
+}
+
 export type { CheckFinishedEvent };

@@ -107,7 +107,12 @@
     </div>
 
     <!-- 对话框 -->
-    <DedupDialog v-model:show="showDedup" :groups="dedupGroups" @applied="onDedupApplied" />
+    <DedupDialog
+      v-model:show="showDedup"
+      :mode="dedupMode"
+      :groups="dedupGroups"
+      @applied="onDedupApplied"
+    />
     <EmptyFolderDialog v-model:show="showEmpty" :items="emptyItems" @applied="onEmptyApplied" />
     <DeadDialog v-model:show="showDead" @deleted="onDeadDeleted" />
     <TrashDialog v-model:show="showTrash" @changed="store.refresh()" />
@@ -118,6 +123,7 @@
       @go-settings="onIncrementGoSettings"
     />
     <RedirectDialog v-model:show="showRedirect" @applied="onRedirectApplied" />
+    <MergeFoldersDialog v-model:show="showMergeFolders" @applied="onMergeApplied" />
 
     <!-- 树节点右键菜单（浏览器原生菜单已在 main.ts 中屏蔽） -->
     <n-dropdown
@@ -230,7 +236,14 @@ import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plug
 import { useAppStore } from "../stores/app";
 import { useI18n } from "../i18n";
 import { api } from "../api";
-import type { CheckFinishedEvent, CheckProgressEvent, DupGroup, ItemDto, TreeNode } from "../types";
+import type {
+  CheckFinishedEvent,
+  CheckProgressEvent,
+  DupGroup,
+  ItemDto,
+  MergeResultDto,
+  TreeNode,
+} from "../types";
 import {
   bookmarkIdsUnder,
   collectSubtree,
@@ -246,6 +259,7 @@ import TrashDialog from "./TrashDialog.vue";
 import SettingsDialog from "./SettingsDialog.vue";
 import IncrementDialog from "./IncrementDialog.vue";
 import RedirectDialog from "./RedirectDialog.vue";
+import MergeFoldersDialog from "./MergeFoldersDialog.vue";
 
 const store = useAppStore();
 const { t } = useI18n();
@@ -663,13 +677,28 @@ async function checkSelected() {
 
 // ---------------- 对话框 ----------------
 const showDedup = ref(false);
+const dedupMode = ref<"exact" | "fuzzy">("exact");
 const dedupGroups = ref<DupGroup[]>([]);
 async function openDedup() {
+  dedupMode.value = "exact";
   dedupGroups.value = await api.dedupPreview();
   showDedup.value = true;
 }
+function openFuzzyDedup() {
+  dedupMode.value = "fuzzy";
+  // DedupDialog 打开时自行读取 settings.fuzzy_options 并重算预览
+  showDedup.value = true;
+}
 async function onDedupApplied(n: number) {
-  message.success(t("dedupApplyOk", { n }));
+  message.success(
+    dedupMode.value === "fuzzy" ? t("fuzzyApplyOk", { n }) : t("dedupApplyOk", { n })
+  );
+  await store.refresh();
+}
+
+const showMergeFolders = ref(false);
+async function onMergeApplied(result: MergeResultDto) {
+  message.success(t("mergeApplyOk", { n: result.mergedGroups, m: result.movedNodes }));
   await store.refresh();
 }
 
@@ -697,7 +726,7 @@ async function onDeadDeleted(n: number) {
 const showTrash = ref(false);
 const showSettings = ref(false);
 
-// ---------------- 整理工具下拉（T02-T04 接入真实对话框） ----------------
+// ---------------- 整理工具下拉（T03 已接入模糊去重/合并文件夹） ----------------
 const organizeOptions = computed(() => [
   { label: t("dedup"), key: "exactDedup" },
   { label: t("fuzzyDedup"), key: "fuzzyDedup" },
@@ -711,11 +740,19 @@ function onOrganizeSelect(key: string) {
     void openDedup();
     return;
   }
+  if (key === "fuzzyDedup") {
+    openFuzzyDedup();
+    return;
+  }
+  if (key === "mergeFolders") {
+    showMergeFolders.value = true;
+    return;
+  }
   if (key === "updateRedirects") {
     showRedirect.value = true;
     return;
   }
-  // T03/T04 会在此挂载真实对话框；当前给出明确反馈，避免点击后静默无响应。
+  // T04 规则归类尚未接入；给出明确反馈，避免点击后静默无响应。
   message.info(t("comingSoon"));
 }
 

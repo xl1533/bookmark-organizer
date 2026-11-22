@@ -38,6 +38,8 @@ export interface ItemDto {
 
 export interface DupGroup {
   normalizedUrl: string;
+  /** 分组用哈希（与 #11/#12 的严格 hash 用途隔离） */
+  hash: string;
   keep: ItemDto;
   duplicates: ItemDto[];
 }

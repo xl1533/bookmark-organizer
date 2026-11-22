@@ -192,7 +192,10 @@ const zh = {
   mergeColGroup: "同名组",
   mergeColFolders: "文件夹",
   mergeColBookmarks: "书签数",
+  mergeColPath: "路径",
+  mergeColDirect: "直接子项",
   mergeColKeep: "保留项",
+  mergeRecursiveNote: "同名子文件夹会递归合并（不产生重复层级）；同名书签全部保留、不改名。",
   mergeEmpty: "没有同名文件夹",
   mergeApplyOk: "已合并 {n} 组，迁移 {m} 个节点",
   mergeBackupNote: "应用前会自动生成带时间戳的 HTML 备份；撤销请使用该备份以替换模式重新导入，回收站无法完整撤销合并。",
@@ -445,7 +448,11 @@ const en: Record<DictKey, string> = {
   mergeColGroup: "Name group",
   mergeColFolders: "Folders",
   mergeColBookmarks: "Bookmarks",
+  mergeColPath: "Path",
+  mergeColDirect: "Direct children",
   mergeColKeep: "Keep",
+  mergeRecursiveNote:
+    "Same-named subfolders are merged recursively (no duplicate levels); same-named bookmarks are all kept unchanged.",
   mergeEmpty: "No duplicate folders",
   mergeApplyOk: "Merged {n} groups, moved {m} nodes",
   mergeBackupNote:

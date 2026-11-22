@@ -69,6 +69,28 @@ pub struct IncrementalPlan {
     pub skipped_count: usize,
 }
 
+/// #10 同名文件夹分组预览（标题 trim + 大小写不敏感，DFS 顺序）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeFolderGroup {
+    /// 规范化后的分组键（trim 后小写）
+    pub key: String,
+    /// 组成员文件夹 id，按 DFS 顺序排列
+    pub folder_ids: Vec<NodeId>,
+    /// 组内各文件夹子树书签数之和
+    pub total_bookmarks: i64,
+    /// DFS 顺序第一个文件夹
+    pub suggested_keep_id: NodeId,
+}
+
+/// #10 合并结果（备份路径由命令层生成）。
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeOutcome {
+    pub merged_groups: usize,
+    pub moved_nodes: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportMode {
     /// 清空后整库导入
@@ -282,101 +304,12 @@ impl Store {
     // ------------------------------------------------------------------
 
     /// 批量移动节点到目标文件夹的 index 位置。
+    ///
+    /// 具体逻辑放在 [`move_nodes_in_tx`]，便于 #10 合并文件夹在同一事务内复用，
+    /// 保证「移动 + 删除空壳」要么全部成功、要么全部回滚。
     pub fn move_nodes(&mut self, ids: &[NodeId], new_parent: NodeId, index: i64) -> CoreResult<()> {
-        let mut ids: Vec<NodeId> = ids.to_vec();
-        ids.retain(|&id| id != ROOT_ID);
-        ids.dedup();
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        // 目标必须是未删除文件夹
-        let target: Option<Node> = self
-            .conn
-            .query_row("SELECT * FROM nodes WHERE id = ?1 AND deleted = 0", params![new_parent], row_node_by_full_row)
-            .optional()?;
-        let target = target.ok_or_else(|| crate::CoreError::Other("目标文件夹不存在".into()))?;
-        if target.kind != NodeKind::Folder {
-            return Err(crate::CoreError::Other("目标不是文件夹".into()));
-        }
-
         let tx = self.conn.transaction()?;
-
-        // 校验被移动节点存在、存活、且目标不在其子树内
-        let id_set: std::collections::HashSet<NodeId> = ids.iter().copied().collect();
-        for &id in &ids {
-            let node: Option<(NodeId, NodeId, String, i64)> = tx
-                .query_row(
-                    "SELECT id, parent_id, kind, position FROM nodes WHERE id = ?1 AND deleted = 0",
-                    params![id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .optional()?;
-            let (_, parent, kind, _) =
-                node.ok_or_else(|| crate::CoreError::Other(format!("节点 {id} 不存在或已删除")))?;
-            if kind != "bookmark" && kind != "folder" {
-                return Err(crate::CoreError::Other("节点类型错误".into()));
-            }
-            // 祖先链包含移动集内节点 → 不能移入自身子树
-            let mut cur = new_parent;
-            let mut hops = 0;
-            while cur != ROOT_ID && hops < 1000 {
-                if id_set.contains(&cur) {
-                    return Err(crate::CoreError::Other("不能把节点移动到其自身子树内".into()));
-                }
-                cur = tx.query_row("SELECT parent_id FROM nodes WHERE id = ?1", params![cur], |r| r.get(0))?;
-                hops += 1;
-            }
-            let _ = parent;
-        }
-
-        // 目标文件夹当前的存活子节点（排除被移动者）
-        let mut stmt = tx.prepare(
-            "SELECT id FROM nodes WHERE parent_id = ?1 AND deleted = 0 ORDER BY position, id",
-        )?;
-        let existing: Vec<NodeId> = stmt
-            .query_map(params![new_parent], |r| r.get(0))?
-            .filter_map(|r| r.ok())
-            .filter(|id| !id_set.contains(id))
-            .collect();
-        drop(stmt);
-
-        let index = index.clamp(0, existing.len() as i64) as usize;
-        let mut base_positions: Vec<NodeId> = existing[..index].to_vec();
-        base_positions.extend(ids.iter().copied());
-        base_positions.extend(existing[index..].to_vec());
-
-        // 记录受影响的老父节点（重排序用）
-        let mut affected_parents: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
-        for &id in &ids {
-            let parent: NodeId =
-                tx.query_row("SELECT parent_id FROM nodes WHERE id = ?1", params![id], |r| r.get(0))?;
-            affected_parents.insert(parent);
-        }
-
-        // 执行移动：先改父节点
-        for &nid in &ids {
-            tx.execute(
-                "UPDATE nodes SET parent_id = ?1 WHERE id = ?2",
-                params![new_parent, nid],
-            )?;
-        }
-        affected_parents.insert(new_parent);
-
-        // 按目标顺序 base_positions 显式编号，使拖拽落点（index）真正生效
-        for (seq, &nid) in base_positions.iter().enumerate() {
-            tx.execute(
-                "UPDATE nodes SET position = ?1 WHERE id = ?2 AND parent_id = ?3",
-                params![seq as i64, nid, new_parent],
-            )?;
-        }
-
-        // 重新编号受影响的老父节点（new_parent 已按 base_positions 编好，跳过）
-        for parent in affected_parents {
-            if parent != new_parent {
-                renumber_children(&tx, parent)?;
-            }
-        }
+        move_nodes_in_tx(&tx, ids, new_parent, index)?;
         tx.commit()?;
         Ok(())
     }
@@ -433,33 +366,8 @@ impl Store {
 
     /// 软删除子树（写入回收站条目），返回条目数。
     pub fn soft_delete(&mut self, ids: &[NodeId]) -> CoreResult<usize> {
-        let now = crate::now_ts();
         let tx = self.conn.transaction()?;
-        let mut count = 0;
-        for &id in ids {
-            if id == ROOT_ID {
-                continue;
-            }
-            let info: Option<(String, String)> = tx
-                .query_row("SELECT title, kind FROM nodes WHERE id = ?1 AND deleted = 0", params![id], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
-                .optional()?;
-            let (title, kind) = match info {
-                Some(v) => v,
-                None => continue,
-            };
-            let sub = subtree_ids(&tx, id)?;
-            let item_count: i64 = subtree_bookmark_count(&tx, id)?;
-            for sid in &sub {
-                tx.execute("UPDATE nodes SET deleted = 1 WHERE id = ?1", params![sid])?;
-            }
-            tx.execute(
-                "INSERT INTO trash (node_id, title, kind, item_count, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, title, kind, item_count, now],
-            )?;
-            count += 1;
-        }
+        let count = soft_delete_in_tx(&tx, ids)?;
         tx.commit()?;
         Ok(count)
     }
@@ -783,6 +691,93 @@ impl Store {
     }
 
     // ------------------------------------------------------------------
+    // #10 合并文件夹
+    // ------------------------------------------------------------------
+
+    /// 预览同名文件夹组：按标题 trim + 大小写不敏感分组，仅返回至少 2 个成员的组。
+    ///
+    /// 只遍历未删除节点；根节点不参与分组；`suggested_keep_id` 取 DFS 顺序第一个。
+    pub fn merge_folder_groups(&self) -> CoreResult<Vec<MergeFolderGroup>> {
+        let nodes = self.load_nodes(false)?;
+        let mut groups: Vec<MergeFolderGroup> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        for folder in dfs_folder_order(&nodes) {
+            let key = folder.title.trim().to_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            let bookmarks = subtree_bookmark_count(&self.conn, folder.id)?;
+            match index.get(&key).copied() {
+                Some(i) => {
+                    groups[i].folder_ids.push(folder.id);
+                    groups[i].total_bookmarks += bookmarks;
+                }
+                None => {
+                    index.insert(key.clone(), groups.len());
+                    groups.push(MergeFolderGroup {
+                        key,
+                        folder_ids: vec![folder.id],
+                        total_bookmarks: bookmarks,
+                        suggested_keep_id: folder.id,
+                    });
+                }
+            }
+        }
+        Ok(groups.into_iter().filter(|g| g.folder_ids.len() >= 2).collect())
+    }
+
+    /// 应用合并：`groups` 中每项为 `(保留文件夹, 被合并文件夹列表)`。
+    ///
+    /// 每个被合并文件夹的直接子节点按原相对顺序追加到保留项末尾；同名子文件夹
+    /// 递归合并（不再产生重复层级）；迁空的壳文件夹软删除进回收站。
+    /// 全程在同一事务内，任一失败整体回滚。
+    pub fn merge_folders(&mut self, groups: &[(NodeId, Vec<NodeId>)]) -> CoreResult<MergeOutcome> {
+        let tx = self.conn.transaction()?;
+        let mut outcome = MergeOutcome {
+            merged_groups: 0,
+            moved_nodes: 0,
+        };
+        for (keep_id, merge_ids) in groups {
+            if *keep_id == ROOT_ID || merge_ids.is_empty() {
+                continue;
+            }
+            let keep_kind: Option<String> = tx
+                .query_row(
+                    "SELECT kind FROM nodes WHERE id = ?1 AND deleted = 0",
+                    params![*keep_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if keep_kind.as_deref() != Some("folder") {
+                return Err(crate::CoreError::Other(format!("保留项 {keep_id} 不是存活文件夹")));
+            }
+            for &merge_id in merge_ids {
+                if merge_id == ROOT_ID || merge_id == *keep_id {
+                    continue;
+                }
+                let merge_kind: Option<String> = tx
+                    .query_row(
+                        "SELECT kind FROM nodes WHERE id = ?1 AND deleted = 0",
+                        params![merge_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if merge_kind.as_deref() != Some("folder") {
+                    continue;
+                }
+                // 若保留项位于被合并项的子树内，迁空后软删除会连带删掉保留项，必须拒绝。
+                if is_ancestor_in_tx(&tx, merge_id, *keep_id)? {
+                    return Err(crate::CoreError::Other("保留项不能位于被合并文件夹的子树内".into()));
+                }
+                merge_one_folder_in_tx(&tx, *keep_id, merge_id, &mut outcome)?;
+            }
+            outcome.merged_groups += 1;
+        }
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    // ------------------------------------------------------------------
     // 设置
     // ------------------------------------------------------------------
 
@@ -851,6 +846,278 @@ impl Store {
 // ----------------------------------------------------------------------
 // 辅助函数
 // ----------------------------------------------------------------------
+
+/// `move_nodes` 的事务内实现，供 #10 合并文件夹复用（不另开事务）。
+fn move_nodes_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    ids: &[NodeId],
+    new_parent: NodeId,
+    index: i64,
+) -> CoreResult<()> {
+    let mut ids: Vec<NodeId> = ids.to_vec();
+    ids.retain(|&id| id != ROOT_ID);
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    // 目标必须是未删除文件夹
+    let target: Option<Node> = tx
+        .query_row("SELECT * FROM nodes WHERE id = ?1 AND deleted = 0", params![new_parent], row_node_by_full_row)
+        .optional()?;
+    let target = target.ok_or_else(|| crate::CoreError::Other("目标文件夹不存在".into()))?;
+    if target.kind != NodeKind::Folder {
+        return Err(crate::CoreError::Other("目标不是文件夹".into()));
+    }
+
+    // 校验被移动节点存在、存活、且目标不在其子树内
+    let id_set: std::collections::HashSet<NodeId> = ids.iter().copied().collect();
+    for &id in &ids {
+        let node: Option<(NodeId, NodeId, String, i64)> = tx
+            .query_row(
+                "SELECT id, parent_id, kind, position FROM nodes WHERE id = ?1 AND deleted = 0",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let (_, parent, kind, _) =
+            node.ok_or_else(|| crate::CoreError::Other(format!("节点 {id} 不存在或已删除")))?;
+        if kind != "bookmark" && kind != "folder" {
+            return Err(crate::CoreError::Other("节点类型错误".into()));
+        }
+        // 祖先链包含移动集内节点 → 不能移入自身子树
+        let mut cur = new_parent;
+        let mut hops = 0;
+        while cur != ROOT_ID && hops < 1000 {
+            if id_set.contains(&cur) {
+                return Err(crate::CoreError::Other("不能把节点移动到其自身子树内".into()));
+            }
+            cur = tx.query_row("SELECT parent_id FROM nodes WHERE id = ?1", params![cur], |r| r.get(0))?;
+            hops += 1;
+        }
+        let _ = parent;
+    }
+
+    // 目标文件夹当前的存活子节点（排除被移动者）
+    let mut stmt = tx.prepare(
+        "SELECT id FROM nodes WHERE parent_id = ?1 AND deleted = 0 ORDER BY position, id",
+    )?;
+    let existing: Vec<NodeId> = stmt
+        .query_map(params![new_parent], |r| r.get(0))?
+        .filter_map(|r| r.ok())
+        .filter(|id| !id_set.contains(id))
+        .collect();
+    drop(stmt);
+
+    let index = index.clamp(0, existing.len() as i64) as usize;
+    let mut base_positions: Vec<NodeId> = existing[..index].to_vec();
+    base_positions.extend(ids.iter().copied());
+    base_positions.extend(existing[index..].to_vec());
+
+    // 记录受影响的老父节点（重排序用）
+    let mut affected_parents: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for &id in &ids {
+        let parent: NodeId =
+            tx.query_row("SELECT parent_id FROM nodes WHERE id = ?1", params![id], |r| r.get(0))?;
+        affected_parents.insert(parent);
+    }
+
+    // 执行移动：先改父节点
+    for &nid in &ids {
+        tx.execute(
+            "UPDATE nodes SET parent_id = ?1 WHERE id = ?2",
+            params![new_parent, nid],
+        )?;
+    }
+    affected_parents.insert(new_parent);
+
+    // 按目标顺序 base_positions 显式编号，使插入位置真正生效且 position 连续
+    for (seq, &nid) in base_positions.iter().enumerate() {
+        tx.execute(
+            "UPDATE nodes SET position = ?1 WHERE id = ?2 AND parent_id = ?3",
+            params![seq as i64, nid, new_parent],
+        )?;
+    }
+
+    // 重新编号受影响的老父节点（new_parent 已按 base_positions 编好，跳过）
+    for parent in affected_parents {
+        if parent != new_parent {
+            renumber_children(tx, parent)?;
+        }
+    }
+    Ok(())
+}
+
+/// `soft_delete` 的事务内实现，供 #10 合并文件夹复用。
+fn soft_delete_in_tx(tx: &rusqlite::Transaction<'_>, ids: &[NodeId]) -> CoreResult<usize> {
+    let now = crate::now_ts();
+    let mut count = 0;
+    for &id in ids {
+        if id == ROOT_ID {
+            continue;
+        }
+        let info: Option<(String, String)> = tx
+            .query_row("SELECT title, kind FROM nodes WHERE id = ?1 AND deleted = 0", params![id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        let (title, kind) = match info {
+            Some(v) => v,
+            None => continue,
+        };
+        let sub = subtree_ids(tx, id)?;
+        let item_count: i64 = subtree_bookmark_count(tx, id)?;
+        for sid in &sub {
+            tx.execute("UPDATE nodes SET deleted = 1 WHERE id = ?1", params![sid])?;
+        }
+        tx.execute(
+            "INSERT INTO trash (node_id, title, kind, item_count, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, title, kind, item_count, now],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// 未删除文件夹的 DFS 顺序（前序，兄弟按 position + id 排序），不含根节点。
+fn dfs_folder_order(nodes: &[Node]) -> Vec<Node> {
+    let map: HashMap<NodeId, &Node> = nodes.iter().map(|n| (n.id, n)).collect();
+    let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for n in nodes {
+        if n.parent_id != n.id {
+            children.entry(n.parent_id).or_default().push(n.id);
+        }
+    }
+    for v in children.values_mut() {
+        v.sort_by_key(|id| {
+            map.get(id)
+                .map(|n| (n.position, n.id))
+                .unwrap_or((0, 0))
+        });
+    }
+    let mut out = Vec::new();
+    fn walk(
+        id: NodeId,
+        map: &HashMap<NodeId, &Node>,
+        children: &HashMap<NodeId, Vec<NodeId>>,
+        out: &mut Vec<Node>,
+    ) {
+        if let Some(n) = map.get(&id) {
+            if id != ROOT_ID && n.kind == NodeKind::Folder {
+                out.push((**n).clone());
+            }
+        }
+        if let Some(kids) = children.get(&id) {
+            for &k in kids {
+                walk(k, map, children, out);
+            }
+        }
+    }
+    walk(ROOT_ID, &map, &children, &mut out);
+    out
+}
+
+/// 某父节点当前的存活直接子节点 id，按 position + id 排序。
+fn direct_child_ids(tx: &rusqlite::Transaction<'_>, parent: NodeId) -> CoreResult<Vec<NodeId>> {
+    let mut stmt = tx.prepare(
+        "SELECT id FROM nodes WHERE parent_id = ?1 AND deleted = 0 ORDER BY position, id",
+    )?;
+    let ids: Vec<NodeId> = stmt
+        .query_map(params![parent], |r| r.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(ids)
+}
+
+/// `ancestor` 是否为 `node` 本身或其祖先（含自引用根节点的兜底）。
+fn is_ancestor_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    ancestor: NodeId,
+    node: NodeId,
+) -> CoreResult<bool> {
+    let mut cur = node;
+    for _ in 0..1000 {
+        if cur == ancestor {
+            return Ok(true);
+        }
+        let parent: Option<NodeId> = tx
+            .query_row("SELECT parent_id FROM nodes WHERE id = ?1", params![cur], |r| r.get(0))
+            .optional()?;
+        match parent {
+            Some(p) if p != cur => cur = p,
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
+}
+
+/// 递归合并一个被合并文件夹到保留文件夹：
+/// 普通子节点按原顺序追加；同名子文件夹继续递归；最后软删除空的壳文件夹。
+fn merge_one_folder_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    keep_id: NodeId,
+    merge_id: NodeId,
+    outcome: &mut MergeOutcome,
+) -> CoreResult<()> {
+    let mut keep_folders: HashMap<String, NodeId> = HashMap::new();
+    for id in direct_child_ids(tx, keep_id)? {
+        let info: Option<(String, String)> = tx
+            .query_row("SELECT kind, title FROM nodes WHERE id = ?1", params![id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        if let Some((kind, title)) = info {
+            if kind == "folder" {
+                keep_folders.insert(title.trim().to_lowercase(), id);
+            }
+        }
+    }
+
+    let mut plain_ids: Vec<NodeId> = Vec::new();
+    let mut same_name_pairs: Vec<(NodeId, NodeId)> = Vec::new();
+    // 同名子文件夹若因祖先关系无法递归合并，则保留壳文件夹，绝不软删除丢数据。
+    let mut skipped_pairs = 0usize;
+    for id in direct_child_ids(tx, merge_id)? {
+        let info: Option<(String, String)> = tx
+            .query_row("SELECT kind, title FROM nodes WHERE id = ?1", params![id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        match info {
+            Some((kind, title)) if kind == "folder" => {
+                let key = title.trim().to_lowercase();
+                if let Some(&target) = keep_folders.get(&key) {
+                    // 同名子文件夹：不搬整个文件夹，只递归搬其子节点，避免重复层级
+                    same_name_pairs.push((target, id));
+                } else {
+                    plain_ids.push(id);
+                    // 同一被合并文件夹内出现多个同名子文件夹时，后续者合并进前者
+                    keep_folders.insert(key, id);
+                }
+            }
+            Some(_) => plain_ids.push(id),
+            None => {}
+        }
+    }
+
+    if !plain_ids.is_empty() {
+        let at = direct_child_ids(tx, keep_id)?.len() as i64;
+        move_nodes_in_tx(tx, &plain_ids, keep_id, at)?;
+        outcome.moved_nodes += plain_ids.len();
+    }
+    for (target, source) in same_name_pairs {
+        if target != source && !is_ancestor_in_tx(tx, source, target)? {
+            merge_one_folder_in_tx(tx, target, source, outcome)?;
+        } else {
+            skipped_pairs += 1;
+        }
+    }
+    // 子节点已全部迁出，软删除空壳文件夹（进回收站，不裸删节点）
+    if skipped_pairs == 0 {
+        let _ = soft_delete_in_tx(tx, &[merge_id])?;
+    }
+    Ok(())
+}
 
 fn row_to_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<Node> {
     let kind: String = r.get("kind")?;
@@ -975,13 +1242,13 @@ fn subtree_impl(
     Ok(ids)
 }
 
-fn subtree_bookmark_count(tx: &rusqlite::Transaction<'_>, root: NodeId) -> CoreResult<i64> {
+fn subtree_bookmark_count(conn: &rusqlite::Connection, root: NodeId) -> CoreResult<i64> {
     let sql = "WITH RECURSIVE sub(id) AS (
             SELECT ?1
             UNION
             SELECT n.id FROM nodes n JOIN sub s ON n.parent_id = s.id
         ) SELECT COUNT(*) FROM nodes WHERE id IN (SELECT id FROM sub) AND kind = 'bookmark'";
-    let c: i64 = tx.query_row(sql, params![root], |r| r.get(0))?;
+    let c: i64 = conn.query_row(sql, params![root], |r| r.get(0))?;
     Ok(c)
 }
 
@@ -1143,5 +1410,100 @@ mod tests {
         let plan = store.incremental_targets(7).unwrap();
         assert!(plan.targets.is_empty());
         assert_eq!(plan.skipped_count, 1);
+    }
+
+    #[test]
+    fn test_merge_folders_preview_and_apply_keeps_order() {
+        let mut store = Store::open_in_memory().unwrap();
+        let tree = vec![
+            NewNode::folder("开发", vec![NewNode::bookmark("a", "https://a.com", None, None)]),
+            NewNode::folder(
+                " 开发 ",
+                vec![
+                    NewNode::bookmark("b", "https://b.com", None, None),
+                    NewNode::folder("UI", vec![NewNode::bookmark("c", "https://c.com", None, None)]),
+                ],
+            ),
+            NewNode::folder("开发", vec![NewNode::bookmark("d", "https://d.com", None, None)]),
+        ];
+        store.import_children(&tree, ImportMode::Replace).unwrap();
+
+        let groups = store.merge_folder_groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].key, "开发");
+        assert_eq!(groups[0].folder_ids.len(), 3);
+        assert_eq!(groups[0].total_bookmarks, 4);
+        let keep = groups[0].suggested_keep_id;
+        let merges: Vec<NodeId> = groups[0]
+            .folder_ids
+            .iter()
+            .copied()
+            .filter(|id| *id != keep)
+            .collect();
+        let outcome = store.merge_folders(&[(keep, merges)]).unwrap();
+        assert_eq!(outcome.merged_groups, 1);
+        assert_eq!(outcome.moved_nodes, 3);
+
+        let nodes = store.all_nodes().unwrap();
+        let mut children: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| n.parent_id == keep && !n.deleted)
+            .collect();
+        children.sort_by_key(|n| n.position);
+        let titles: Vec<&str> = children.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "UI", "d"]);
+        let positions: Vec<i64> = children.iter().map(|n| n.position).collect();
+        assert_eq!(positions, vec![0, 1, 2, 3]);
+        let alive: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| {
+                n.parent_id == ROOT_ID && n.id != ROOT_ID && n.kind == NodeKind::Folder && !n.deleted
+            })
+            .collect();
+        assert_eq!(alive.len(), 1);
+        assert_eq!(alive[0].id, keep);
+        assert_eq!(store.list_trash().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_merge_folders_recursive_same_name_subfolder() {
+        let mut store = Store::open_in_memory().unwrap();
+        let tree = vec![
+            NewNode::folder(
+                "Dev",
+                vec![NewNode::folder(
+                    "UI",
+                    vec![NewNode::bookmark("one", "https://one.com", None, None)],
+                )],
+            ),
+            NewNode::folder(
+                "dev",
+                vec![NewNode::folder(
+                    "ui",
+                    vec![NewNode::bookmark("two", "https://two.com", None, None)],
+                )],
+            ),
+        ];
+        store.import_children(&tree, ImportMode::Replace).unwrap();
+
+        let groups = store.merge_folder_groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].folder_ids.len(), 2);
+        let keep = groups[0].suggested_keep_id;
+        let merge = groups[0].folder_ids[1];
+        let outcome = store.merge_folders(&[(keep, vec![merge])]).unwrap();
+        assert_eq!(outcome.moved_nodes, 1);
+
+        let nodes = store.all_nodes().unwrap();
+        let ui_folders: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Folder && n.title.eq_ignore_ascii_case("ui") && !n.deleted)
+            .collect();
+        assert_eq!(ui_folders.len(), 1);
+        let ui_children: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| n.parent_id == ui_folders[0].id && !n.deleted)
+            .collect();
+        assert_eq!(ui_children.len(), 2);
     }
 }
