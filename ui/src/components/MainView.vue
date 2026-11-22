@@ -17,8 +17,14 @@
         <n-button :disabled="!store.running" type="warning" ghost @click="store.cancelCheck()">
           {{ t("stopCheck") }}
         </n-button>
+        <n-button :disabled="store.running" @click="onIncrementalCheck">
+          {{ t("incrementalCheck") }}
+        </n-button>
       </n-space>
       <n-space :size="8" align="center" :wrap-item="false">
+        <n-dropdown :options="organizeOptions" trigger="click" @select="onOrganizeSelect">
+          <n-button>{{ t("organizeTools") }}</n-button>
+        </n-dropdown>
         <n-button @click="openDedup">{{ t("dedup") }}</n-button>
         <n-button @click="openEmpty">{{ t("emptyFolders") }}</n-button>
         <n-button type="error" ghost @click="openDead">{{ t("deleteDead") }}</n-button>
@@ -219,6 +225,14 @@ import { useAppStore } from "../stores/app";
 import { useI18n } from "../i18n";
 import { api } from "../api";
 import type { CheckFinishedEvent, CheckProgressEvent, DupGroup, ItemDto, TreeNode } from "../types";
+import {
+  bookmarkIdsUnder,
+  collectSubtree,
+  contextIds,
+  folderOptions as buildFolderOptions,
+  isRootNode,
+  rootFolderId,
+} from "../composables/tree";
 import DedupDialog from "./DedupDialog.vue";
 import EmptyFolderDialog from "./EmptyFolderDialog.vue";
 import DeadDialog from "./DeadDialog.vue";
@@ -357,43 +371,9 @@ function onChecked(keys: number[]) {
 }
 
 // ---------------- 树节点公共工具 ----------------
-function isRootNode(n: TreeNode) {
-  return n.parentId === n.id;
-}
-
-function findItem(id: number, items: NodeItem[] = treeData.value): NodeItem | undefined {
-  for (const it of items) {
-    if (it.node.id === id) return it;
-    const found = findItem(id, it.children);
-    if (found) return found;
-  }
-  return undefined;
-}
-
-function collectSubtree(id: number, out: Set<number>) {
-  const item = findItem(id);
-  if (!item) return;
-  const walk = (it: NodeItem) => {
-    out.add(it.node.id);
-    it.children.forEach(walk);
-  };
-  walk(item);
-}
-
-function bookmarkIdsUnder(id: number): number[] {
-  const out: number[] = [];
-  const walk = (it: NodeItem) => {
-    if (it.node.kind === "bookmark") out.push(it.node.id);
-    it.children.forEach(walk);
-  };
-  const item = findItem(id);
-  if (item) walk(item);
-  return out;
-}
-
-function rootFolderId(): number | null {
-  return store.nodes.find((n) => n.kind === "folder" && isRootNode(n))?.id ?? null;
-}
+// isRootNode / findItem / collectSubtree / bookmarkIdsUnder / rootFolderId /
+// folderOptions / contextIds 已抽到 ../composables/tree，供各对话框复用；
+// 本组件只在调用处注入 treeData.value / store.nodes / store.checkedIds 等响应式状态。
 
 // ---------------- 拖拽移动 ----------------
 const dragIds = ref<number[]>([]);
@@ -409,7 +389,7 @@ function onTreeDragStart({ event, node }: { event: DragEvent; node: TreeOption }
       ? [...store.checkedIds]
       : [id];
   const forbidden = new Set<number>();
-  for (const dragId of dragIds.value) collectSubtree(dragId, forbidden);
+  for (const dragId of dragIds.value) collectSubtree(dragId, forbidden, treeData.value);
   forbiddenDropIds.value = forbidden;
 }
 
@@ -507,14 +487,9 @@ const ctxOptions = computed<CtxOption[]>(() => {
   return opts;
 });
 
-function contextIds(node: TreeNode): number[] {
-  if (store.checkedIds.length > 1 && store.checkedIds.includes(node.id)) {
-    return store.checkedIds.filter((id) => {
-      const n = store.nodeById(id);
-      return n != null && !isRootNode(n);
-    });
-  }
-  return [node.id];
+/** 把 store 的响应式状态注入纯函数 contextIds，保持第 1 期右键作用域语义。 */
+function contextIdsForNode(node: TreeNode): number[] {
+  return contextIds(node, store.checkedIds, (id) => store.nodeById(id));
 }
 
 async function onCtxSelect(key: string) {
@@ -526,7 +501,7 @@ async function onCtxSelect(key: string) {
       await openBookmark(node);
       break;
     case "check": {
-      const ids = node.kind === "bookmark" ? [node.id] : bookmarkIdsUnder(node.id);
+      const ids = node.kind === "bookmark" ? [node.id] : bookmarkIdsUnder(node.id, treeData.value);
       if (ids.length === 0) {
         message.info(t("checkNothing"));
         break;
@@ -543,10 +518,10 @@ async function onCtxSelect(key: string) {
       openCreateFolder(node.id);
       break;
     case "move":
-      openMoveModal(contextIds(node), node.parentId);
+      openMoveModal(contextIdsForNode(node), node.parentId);
       break;
     case "delete":
-      openDeleteModal(contextIds(node));
+      openDeleteModal(contextIdsForNode(node));
       break;
   }
 }
@@ -559,7 +534,7 @@ const moving = ref(false);
 
 const moveOptions = computed(() => {
   const forbidden = new Set<number>();
-  for (const id of moveIds.value) collectSubtree(id, forbidden);
+  for (const id of moveIds.value) collectSubtree(id, forbidden, treeData.value);
   return folderOptions.value.filter((o) => !forbidden.has(o.value as number));
 });
 
@@ -567,7 +542,7 @@ function openMoveModal(ids: number[], defaultTarget: number) {
   moveIds.value = ids;
   moveTargetId.value = folderOptions.value.some((o) => o.value === defaultTarget)
     ? defaultTarget
-    : (rootFolderId() ?? (folderOptions.value[0]?.value as number | undefined) ?? null);
+    : (rootFolderId(store.nodes) ?? (folderOptions.value[0]?.value as number | undefined) ?? null);
   showMoveModal.value = true;
 }
 
@@ -714,34 +689,37 @@ async function onDeadDeleted(n: number) {
 const showTrash = ref(false);
 const showSettings = ref(false);
 
+// ---------------- 整理工具下拉（T02-T04 接入真实对话框） ----------------
+const organizeOptions = computed(() => [
+  { label: t("dedup"), key: "exactDedup" },
+  { label: t("fuzzyDedup"), key: "fuzzyDedup" },
+  { label: t("mergeFolders"), key: "mergeFolders" },
+  { label: t("updateRedirects"), key: "updateRedirects" },
+  { label: t("rulesClassify"), key: "rulesClassify" },
+]);
+
+function onOrganizeSelect(key: string) {
+  if (key === "exactDedup") {
+    void openDedup();
+    return;
+  }
+  // T02-T04 会在此挂载真实对话框；当前给出明确反馈，避免点击后静默无响应。
+  message.info(t("comingSoon"));
+}
+
+async function onIncrementalCheck() {
+  // T02 会在此打开增量预览确认卡；当前先占位反馈。
+  message.info(t("comingSoon"));
+}
+
 // ---------------- 新建文件夹 ----------------
 const showCreateFolder = ref(false);
 const newFolderName = ref("");
 const createParentId = ref<number | null>(null);
 const creatingFolder = ref(false);
 
-// 所有文件夹（含根）作为父目录候选项
-const folderOptions = computed(() => {
-  const folders = store.nodes.filter((n) => n.kind === "folder");
-  const isRoot = (n: TreeNode) => n.parentId === n.id;
-  const pathOf = (n: TreeNode): string => {
-    if (isRoot(n)) return t("rootFolder");
-    const parts: string[] = [n.title];
-    let cur = n;
-    let guard = 0;
-    while (guard++ < 100) {
-      const p = folders.find((f) => f.id === cur.parentId);
-      if (!p) break;
-      if (isRoot(p)) break; // 根用固定标签表示，不拼它的 title
-      parts.unshift(p.title);
-      cur = p;
-    }
-    return `${t("rootFolder")} / ${parts.join(" / ")}`;
-  };
-  return folders
-    .map((n) => ({ label: pathOf(n), value: n.id }))
-    .sort((a, b) => String(a.label).localeCompare(String(b.label)));
-});
+// 所有文件夹（含根）作为父目录候选项；路径拼接与排序逻辑已抽到 composables/tree.ts
+const folderOptions = computed(() => buildFolderOptions(store.nodes, t("rootFolder")));
 
 const parentFolderName = computed(() => {
   const found = folderOptions.value.find((o) => o.value === createParentId.value);
@@ -758,7 +736,7 @@ function openCreateFolder(parentId?: number) {
     const checkedFolder = store.checkedIds
       .map((id) => store.nodeById(id))
       .find((n) => n && n.kind === "folder");
-    createParentId.value = checkedFolder?.id ?? rootFolderId() ?? null;
+    createParentId.value = checkedFolder?.id ?? rootFolderId(store.nodes) ?? null;
   }
   showCreateFolder.value = true;
 }

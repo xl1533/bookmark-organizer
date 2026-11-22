@@ -11,10 +11,16 @@
 //!
 //! 哈希使用 SHA-256（十六进制），避免直接存储明文聚合冲突。
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// 第 2 期模糊去重的可配置项（第 1 期仅实现结构，默认关闭）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 第 2 期模糊去重的可配置项。
+///
+/// `Default` 采用 UI 建议默认值（query=关，其余=开），同时供 serde 反序列化缺失字段补齐。
+/// 严格标准化与第 1 期精确去重必须显式使用 [`FuzzyOptions::STRICT`]，切勿用 `Default`，
+/// 否则 `?utm_source=` 这类变化会被当成“未变更”，破坏 #11 的判定语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct FuzzyOptions {
     /// 忽略整个 query 串
     pub ignore_query: bool,
@@ -26,13 +32,26 @@ pub struct FuzzyOptions {
     pub ignore_fragment: bool,
 }
 
+impl FuzzyOptions {
+    /// 严格模式：所有放宽开关关闭。
+    ///
+    /// 用途：严格 URL hash（#11 变更判定 / #12 同步刷新）与第 1 期精确去重。
+    /// 与 `FuzzyOptions::default()` 的模糊默认值严格隔离，禁止互换。
+    pub const STRICT: Self = Self {
+        ignore_query: false,
+        ignore_case: false,
+        ignore_trailing_slash: false,
+        ignore_fragment: false,
+    };
+}
+
 impl Default for FuzzyOptions {
     fn default() -> Self {
         FuzzyOptions {
             ignore_query: false,
-            ignore_case: false,
-            ignore_trailing_slash: false,
-            ignore_fragment: false,
+            ignore_case: true,
+            ignore_trailing_slash: true,
+            ignore_fragment: true,
         }
     }
 }
@@ -45,9 +64,11 @@ pub enum UrlNormError {
     Invalid(String),
 }
 
-/// 严格标准化（等价于 `normalize_with(raw, FuzzyOptions::default())`）。
+/// 严格标准化（等价于 `normalize_with(raw, FuzzyOptions::STRICT)`）。
+///
+/// 刻意不使用 `FuzzyOptions::default()`：后者的默认值是模糊去重的 UI 建议值。
 pub fn normalize(raw: &str) -> Result<String, UrlNormError> {
-    normalize_with(raw, FuzzyOptions::default())
+    normalize_with(raw, FuzzyOptions::STRICT)
 }
 
 /// 按选项标准化 URL。
@@ -214,5 +235,45 @@ mod tests {
         let h2 = url_hash(&normalize("HTTPS://EXAMPLE.COM/a").unwrap());
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64);
+    }
+
+    #[test]
+    fn test_fuzzy_defaults_and_strict_isolation() {
+        let d = FuzzyOptions::default();
+        assert!(!d.ignore_query);
+        assert!(d.ignore_case);
+        assert!(d.ignore_trailing_slash);
+        assert!(d.ignore_fragment);
+
+        let strict = FuzzyOptions::STRICT;
+        assert!(!strict.ignore_query);
+        assert!(!strict.ignore_case);
+        assert!(!strict.ignore_trailing_slash);
+        assert!(!strict.ignore_fragment);
+
+        // 默认值改变后，严格标准化不得随之放宽
+        assert_eq!(
+            normalize("HTTPS://Example.COM/A/?q=1#top").unwrap(),
+            "https://example.com/A/?q=1#top"
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_options_serde_round_trip() {
+        let opts = FuzzyOptions::default();
+        let json = serde_json::to_string(&opts).unwrap();
+        assert_eq!(
+            json,
+            r#"{"ignoreQuery":false,"ignoreCase":true,"ignoreTrailingSlash":true,"ignoreFragment":true}"#
+        );
+        let back: FuzzyOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, opts);
+
+        // #[serde(default)]：缺失字段用 Default 补齐
+        let partial: FuzzyOptions = serde_json::from_str(r#"{"ignoreQuery":true}"#).unwrap();
+        assert!(partial.ignore_query);
+        assert!(partial.ignore_case);
+        assert!(partial.ignore_trailing_slash);
+        assert!(partial.ignore_fragment);
     }
 }

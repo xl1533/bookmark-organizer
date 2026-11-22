@@ -10,7 +10,7 @@ use bookmark_core::model::{NewNode, Node, NodeKind, NodeId, ROOT_ID};
 use bookmark_core::netscape;
 use bookmark_core::store::{ImportMode, ImportStats, Stats, TrashEntry};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
 use crate::state::{AppState, CheckRunHandle};
@@ -94,6 +94,162 @@ pub struct ImportSummary {
 #[serde(rename_all = "camelCase")]
 pub struct StartCheckResult {
     pub total: usize,
+}
+
+// ---------------------------------------------------------------------------
+// 第 2 期 DTO 骨架
+//
+// 仅定义数据结构，不注册占位命令；命令函数将在 T02-T05 随 core 实现一并加入。
+// 输出型 DTO 只需 Serialize；作为命令入参的 DTO 额外派生 Deserialize。
+// core 侧的 Rule / RuleInput / WebDavConfig 属于 T04 / T05 的 rules.rs / webdav.rs，
+// 此处以 *Dto 命名避免与其重名，届时可做薄转换。
+// ---------------------------------------------------------------------------
+
+/// #11 增量检测计划：四类原因计数与实际待检测总数（预览数量 = 实际 total）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncrementalPlanDto {
+    pub new_count: usize,
+    pub url_changed_count: usize,
+    pub stale_count: usize,
+    pub skipped_count: usize,
+    pub total: usize,
+}
+
+/// #10 同名文件夹分组预览（标题 trim + 大小写不敏感）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeGroupDto {
+    pub key: String,
+    pub folders: Vec<ItemDto>,
+    pub total_bookmarks: i64,
+    /// DFS 顺序第一个，UI 允许改选
+    pub suggested_keep_id: NodeId,
+}
+
+/// #10 用户在预览中确认的分组选择。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeChoiceDto {
+    pub keep_id: NodeId,
+    pub merge_ids: Vec<NodeId>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeResultDto {
+    pub backup_path: String,
+    pub merged_groups: usize,
+    pub moved_nodes: usize,
+}
+
+/// #12 重定向候选（旧地址 → 最终地址），仅 ok/suspicious 且 HTTP 协议。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedirectDto {
+    pub node_id: NodeId,
+    pub title: String,
+    pub old_url: String,
+    pub new_url: String,
+    pub status: CheckStatus,
+    pub checked_at: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedirectApplyDto {
+    pub backup_path: String,
+    pub updated: usize,
+}
+
+/// #13 规则匹配字段（包含匹配，大小写不敏感；host 额外支持后缀匹配）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleFieldDto {
+    Host,
+    UrlKeyword,
+    TitleKeyword,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleDto {
+    pub id: String,
+    pub field: RuleFieldDto,
+    pub pattern: String,
+    pub target_path: String,
+    pub enabled: bool,
+}
+
+/// #13 新增规则入参：id 由后端生成（时间戳 + 序号）后回填。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleInputDto {
+    pub field: RuleFieldDto,
+    pub pattern: String,
+    pub target_path: String,
+    pub enabled: bool,
+}
+
+/// #13 归类预览行：命中规则与目标路径，冲突项标红。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifyItemDto {
+    pub node_id: NodeId,
+    pub title: String,
+    pub current_path: String,
+    pub matched_rule_id: String,
+    pub matched_rule_pattern: String,
+    pub target_path: String,
+    pub conflict: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifyChoiceDto {
+    pub node_id: NodeId,
+    pub target_path: String,
+}
+
+/// #14 WebDAV 配置（先测后存；密码明文仅存本机 settings）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavConfigDto {
+    pub url: String,
+    pub user: String,
+    pub password: String,
+    pub dir: String,
+    pub allow_http: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavFileDto {
+    pub name: String,
+    pub size: i64,
+    pub modified: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavUploadDto {
+    pub backup_path: String,
+    pub remote_path: String,
+    pub bytes: i64,
 }
 
 // ---------------------------------------------------------------------------

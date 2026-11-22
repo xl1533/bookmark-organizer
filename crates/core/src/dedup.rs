@@ -1,8 +1,8 @@
 //! URL 精确去重（第 1 期）。
 //!
 //! 按“标准化后的 URL 哈希”分组，组内按 DFS（树形展示）顺序保留第一个，
-//! 其余视为重复项。第 2 期模糊去重将在 [`crate::urlnorm::FuzzyOptions`]
-//! 基础上扩展，此处仅预留。
+//! 其余视为重复项。第 2 期模糊去重通过 [`find_duplicate_groups_with`] 与
+//! [`crate::urlnorm::FuzzyOptions`] 扩展；本模块的默认入口始终保持严格语义。
 
 use std::collections::HashMap;
 
@@ -29,7 +29,9 @@ pub struct DupGroup {
 /// `bookmarks` 必须按树形展示顺序给出 `(节点id, 原始URL)`，
 /// 保证“保留第一个”的语义与 UI 中的顺序一致。
 pub fn find_duplicate_groups(bookmarks: &[(NodeId, String)]) -> Vec<DupGroup> {
-    find_duplicate_groups_with(bookmarks, FuzzyOptions::default())
+    // 第 2 期起 FuzzyOptions::default() 是模糊去重的 UI 建议默认值（其余开关打开）。
+    // 第 1 期“精确去重”必须维持严格语义，因此显式使用 STRICT。
+    find_duplicate_groups_with(bookmarks, FuzzyOptions::STRICT)
 }
 
 /// 带模糊选项的分组（第 2 期接口预留）。
