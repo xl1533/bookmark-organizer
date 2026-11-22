@@ -10,8 +10,19 @@ on:
   push:
     branches: [main, master]
     tags: ["v*"]
+    # 纯文档改动无需跑完整构建（tag 发布仍照常构建）
+    paths-ignore:
+      - "README.md"
+      - "ROADMAP.md"
+      - "docs/**"
+      - "*.md"
   pull_request:
     branches: [main, master]
+    paths-ignore:
+      - "README.md"
+      - "ROADMAP.md"
+      - "docs/**"
+      - "*.md"
   workflow_dispatch:
 
 jobs:
