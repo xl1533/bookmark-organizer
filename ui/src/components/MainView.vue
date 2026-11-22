@@ -112,6 +112,12 @@
     <DeadDialog v-model:show="showDead" @deleted="onDeadDeleted" />
     <TrashDialog v-model:show="showTrash" @changed="store.refresh()" />
     <SettingsDialog v-model:show="showSettings" />
+    <IncrementDialog
+      v-model:show="showIncrement"
+      @started="onIncrementStarted"
+      @go-settings="onIncrementGoSettings"
+    />
+    <RedirectDialog v-model:show="showRedirect" @applied="onRedirectApplied" />
 
     <!-- 树节点右键菜单（浏览器原生菜单已在 main.ts 中屏蔽） -->
     <n-dropdown
@@ -238,6 +244,8 @@ import EmptyFolderDialog from "./EmptyFolderDialog.vue";
 import DeadDialog from "./DeadDialog.vue";
 import TrashDialog from "./TrashDialog.vue";
 import SettingsDialog from "./SettingsDialog.vue";
+import IncrementDialog from "./IncrementDialog.vue";
+import RedirectDialog from "./RedirectDialog.vue";
 
 const store = useAppStore();
 const { t } = useI18n();
@@ -703,13 +711,46 @@ function onOrganizeSelect(key: string) {
     void openDedup();
     return;
   }
-  // T02-T04 会在此挂载真实对话框；当前给出明确反馈，避免点击后静默无响应。
+  if (key === "updateRedirects") {
+    showRedirect.value = true;
+    return;
+  }
+  // T03/T04 会在此挂载真实对话框；当前给出明确反馈，避免点击后静默无响应。
   message.info(t("comingSoon"));
 }
 
-async function onIncrementalCheck() {
-  // T02 会在此打开增量预览确认卡；当前先占位反馈。
-  message.info(t("comingSoon"));
+function onIncrementalCheck() {
+  showIncrement.value = true;
+}
+
+// ---------------- T02：增量检测 / 重定向更新 ----------------
+const showIncrement = ref(false);
+const showRedirect = ref(false);
+
+function onIncrementStarted(total: number) {
+  // 后端通过 check://progress / check://finished 驱动进度，这里只初始化显示。
+  // total=0 时后端不派发事件，不能把 running 置为 true，否则进度条永久卡住。
+  if (total <= 0) {
+    message.info(t("incrementEmpty"));
+    return;
+  }
+  store.running = true;
+  store.progress.done = 0;
+  store.progress.total = total;
+  store.progress.ok = 0;
+  store.progress.suspicious = 0;
+  store.progress.dead = 0;
+  message.info(t("incrementStarted", { n: total }));
+}
+
+function onIncrementGoSettings() {
+  showIncrement.value = false;
+  showSettings.value = true;
+}
+
+async function onRedirectApplied(n: number) {
+  message.success(t("redirectApplyOk", { n }));
+  await store.refresh();
 }
 
 // ---------------- 新建文件夹 ----------------

@@ -33,6 +33,17 @@
           {{ testResult.message }}
         </n-text>
       </n-form-item>
+      <n-form-item :label="t('settingsIncrementalDays')">
+        <n-input-number
+          v-model:value="incrementalDays"
+          :min="1"
+          :max="365"
+          style="width: 160px"
+        />
+      </n-form-item>
+      <n-form-item label=" ">
+        <n-text depth="3" style="font-size: 12px">{{ t("settingsIncrementalHint") }}</n-text>
+      </n-form-item>
       <n-form-item :label="t('settingsDb')">
         <n-text code style="font-size: 11px; word-break: break-all">{{ dbPath }}</n-text>
       </n-form-item>
@@ -58,6 +69,7 @@ import {
   NFormItem,
   NInput,
   NInputGroup,
+  NInputNumber,
   NModal,
   NRadioButton,
   NRadioGroup,
@@ -67,7 +79,7 @@ import {
 } from "naive-ui";
 import { useI18n, type Locale } from "../i18n";
 import { useAppStore } from "../stores/app";
-import { api } from "../api";
+import { api, getIncrementalDays, setIncrementalDays } from "../api";
 import type { ProxyTestResult } from "../types";
 
 const props = defineProps<{ show: boolean }>();
@@ -83,6 +95,7 @@ const visible = computed({
 const lang = ref<Locale>("zh");
 const theme = ref<"auto" | "light" | "dark">("auto");
 const proxy = ref("");
+const incrementalDays = ref(7);
 const testing = ref(false);
 const saving = ref(false);
 const testResult = ref<ProxyTestResult | null>(null);
@@ -102,6 +115,7 @@ async function load() {
   } catch {
     proxy.value = "";
   }
+  incrementalDays.value = await getIncrementalDays();
   try {
     dbPath.value = await api.getDbPath();
   } catch {
@@ -127,6 +141,7 @@ async function save() {
     setLocale(lang.value);
     store.setThemeMode(theme.value);
     await api.setProxy(proxy.value.trim());
+    await setIncrementalDays(incrementalDays.value);
     await store.refresh();
     visible.value = false;
   } finally {

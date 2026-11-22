@@ -39,6 +39,10 @@ pub fn run() {
             commands::dedup_apply,
             commands::start_check,
             commands::cancel_check,
+            commands::incremental_preview,
+            commands::start_incremental_check,
+            commands::list_redirects,
+            commands::apply_redirects,
             commands::list_dead,
             commands::delete_dead,
             commands::trash_list,
@@ -47,6 +51,8 @@ pub fn run() {
             commands::get_proxy,
             commands::set_proxy,
             commands::test_proxy,
+            commands::get_setting,
+            commands::set_setting,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

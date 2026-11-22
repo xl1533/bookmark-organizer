@@ -52,6 +52,25 @@ pub struct Stats {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// #11 增量检测计划：待检测目标 + 四类原因计数。
+///
+    /// 计数口径（与第 1 期全量检测共用 `dfs_bookmarks()` 作用域，即有 URL 的存活书签；
+    /// 每本只落入一类，四类之和 = 该作用域总数，与预览 UI 自洽）：
+    /// - 优先级 `新增 > URL 变更 > 超期 > 跳过`；
+/// - 同时命中「URL 变更 + 超期」时计入 `url_changed_count`（变更语义更强，重检一次即可）；
+/// - 非 HTTP 协议（javascript:/mailto:/chrome:/place: 等）按第 1 期规则永不入队，计入 `skipped_count`；
+/// - 恒等式：`targets.len() == new_count + url_changed_count + stale_count == 总数 - skipped_count`。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncrementalPlan {
+    pub targets: Vec<NodeId>,
+    pub new_count: usize,
+    pub url_changed_count: usize,
+    pub stale_count: usize,
+    pub skipped_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportMode {
     /// 清空后整库导入
     Replace,
@@ -649,6 +668,122 @@ impl Store {
     }
 
     // ------------------------------------------------------------------
+    // 第 2 期：增量检测 / 重定向
+    // ------------------------------------------------------------------
+
+    /// #11 计算增量检测目标（只读，不改动任何检测结果）。
+    ///
+    /// 判定规则（三者取并集，按「新增 > URL 变更 > 超期」优先级归入唯一计数桶）：
+    /// 1. `check_results` 中无该 node_id 行 → 新增；
+    /// 2. 当前 `nodes.url` 的**严格** `urlnorm::url_hash_of` 与 `check_results.url_hash` 不等 → URL 变更。
+    ///    刻意不用模糊 hash（FuzzyOptions::default / normalize_with），否则 `?utm_source=` 变化
+    ///    会被误判为「未变更」，长期复用过期结果；
+    /// 3. `now - checked_at > days * 86400` → 超期；
+    /// 4. 其余跳过。非 HTTP 协议按第 1 期 checker 入队规则一律跳过，
+    ///    不进入 targets、不写 check_results、保留原 status/checked_at/final_url。
+    pub fn incremental_targets(&self, days: i64) -> CoreResult<IncrementalPlan> {
+        let now = crate::now_ts();
+        let threshold = days.max(0).saturating_mul(86_400);
+        let cutoff = now.saturating_sub(threshold);
+
+        let bookmarks = self.dfs_bookmarks()?;
+        let mut records: HashMap<NodeId, (String, i64)> = HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT cr.node_id, cr.url_hash, cr.checked_at FROM check_results cr
+                 JOIN nodes n ON n.id = cr.node_id WHERE n.deleted = 0",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, NodeId>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, hash, checked_at) = row?;
+                records.insert(id, (hash, checked_at));
+            }
+        }
+
+        let mut plan = IncrementalPlan {
+            targets: Vec::with_capacity(bookmarks.len()),
+            new_count: 0,
+            url_changed_count: 0,
+            stale_count: 0,
+            skipped_count: 0,
+        };
+        for (node_id, url) in bookmarks {
+            if !is_http_url(&url) {
+                plan.skipped_count += 1;
+                continue;
+            }
+            match records.get(&node_id) {
+                None => {
+                    plan.new_count += 1;
+                    plan.targets.push(node_id);
+                }
+                Some((stored_hash, checked_at)) => {
+                    // 严格 hash，与 upsert_check_result 的写入口径一致
+                    let strict_hash = crate::urlnorm::url_hash_of(&url)
+                        .map(|(_, hash)| hash)
+                        .unwrap_or_default();
+                    if strict_hash != *stored_hash {
+                        plan.url_changed_count += 1;
+                        plan.targets.push(node_id);
+                    } else if *checked_at < cutoff {
+                        plan.stale_count += 1;
+                        plan.targets.push(node_id);
+                    } else {
+                        plan.skipped_count += 1;
+                    }
+                }
+            }
+        }
+        Ok(plan)
+    }
+
+    /// #12 把检测得到的最终地址写回书签，并同步刷新检测结果缓存。
+    ///
+    /// `nodes.url` 与 `check_results.url/url_hash` 在同一事务内更新，避免中途失败导致两表不一致；
+    /// `status` / `checked_at` / `final_url` 保持不变。同步严格 hash 后，下一次 #11 不会因
+    /// hash 不一致把同一链接再检一遍。
+    pub fn apply_redirects(&mut self, ids: &[NodeId]) -> CoreResult<usize> {
+        let tx = self.conn.transaction()?;
+        let mut updated = 0usize;
+        for &id in ids {
+            let final_url: Option<String> = tx
+                .query_row(
+                    "SELECT cr.final_url FROM check_results cr
+                     JOIN nodes n ON n.id = cr.node_id
+                     WHERE cr.node_id = ?1 AND n.deleted = 0",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let new_url = match final_url {
+                Some(url) if !url.trim().is_empty() => url,
+                _ => continue,
+            };
+            let strict_hash = match crate::urlnorm::url_hash_of(&new_url) {
+                Ok((_, hash)) => hash,
+                Err(_) => continue,
+            };
+            tx.execute(
+                "UPDATE nodes SET url = ?1 WHERE id = ?2 AND deleted = 0",
+                params![new_url, id],
+            )?;
+            tx.execute(
+                "UPDATE check_results SET url = ?1, url_hash = ?2 WHERE node_id = ?3",
+                params![new_url, strict_hash, id],
+            )?;
+            updated += 1;
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    // ------------------------------------------------------------------
     // 设置
     // ------------------------------------------------------------------
 
@@ -849,4 +984,165 @@ fn subtree_bookmark_count(tx: &rusqlite::Transaction<'_>, root: NodeId) -> CoreR
         ) SELECT COUNT(*) FROM nodes WHERE id IN (SELECT id FROM sub) AND kind = 'bookmark'";
     let c: i64 = tx.query_row(sql, params![root], |r| r.get(0))?;
     Ok(c)
+}
+
+/// 与第 1 期 `checker::check_one` 一致的 HTTP(S) 入队判据。
+/// javascript:/mailto:/chrome:/place: 等非 HTTP 协议不入队、不写检测结果。
+pub fn is_http_url(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checker::{CheckResult, CheckStatus};
+    use crate::model::NewNode;
+
+    fn seed(urls: &[&str]) -> (Store, Vec<NodeId>) {
+        let mut store = Store::open_in_memory().unwrap();
+        let items: Vec<NewNode> = urls
+            .iter()
+            .map(|u| NewNode::bookmark(*u, *u, None, None))
+            .collect();
+        store.import_children(&items, ImportMode::Replace).unwrap();
+        let ids: Vec<NodeId> = store
+            .dfs_bookmarks()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        (store, ids)
+    }
+
+    fn cached(node_id: NodeId, url: &str, checked_at: i64) -> CheckResult {
+        CheckResult {
+            node_id,
+            url: url.to_string(),
+            status: CheckStatus::Ok,
+            http_code: Some(200),
+            final_url: None,
+            message: None,
+            elapsed_ms: 1,
+            checked_at,
+        }
+    }
+
+    #[test]
+    fn test_incremental_targets_three_reasons_and_union() {
+        let (mut store, ids) = seed(&[
+            "https://a.com/new",
+            "https://a.com/p?x=2",
+            "https://a.com/stale",
+            "https://a.com/fresh",
+            "javascript:alert(1)",
+        ]);
+        let now = crate::now_ts();
+        // URL 变更：缓存里是 x=1，当前节点是 x=2
+        store
+            .upsert_check_result(&cached(ids[1], "https://a.com/p?x=1", now))
+            .unwrap();
+        // 超期：8 天前，超过 7 天阈值
+        store
+            .upsert_check_result(&cached(ids[2], "https://a.com/stale", now - 8 * 86_400))
+            .unwrap();
+        // 有效缓存
+        store
+            .upsert_check_result(&cached(ids[3], "https://a.com/fresh", now))
+            .unwrap();
+
+        let plan = store.incremental_targets(7).unwrap();
+        assert_eq!(plan.new_count, 1);
+        assert_eq!(plan.url_changed_count, 1);
+        assert_eq!(plan.stale_count, 1);
+        // fresh（缓存有效）+ javascript（非 HTTP）均跳过
+        assert_eq!(plan.skipped_count, 2);
+        assert_eq!(plan.targets.len(), 3);
+        assert_eq!(
+            plan.new_count + plan.url_changed_count + plan.stale_count + plan.skipped_count,
+            5
+        );
+        assert!(plan.targets.contains(&ids[0]));
+        assert!(plan.targets.contains(&ids[1]));
+        assert!(plan.targets.contains(&ids[2]));
+        assert!(!plan.targets.contains(&ids[3]));
+        assert!(!plan.targets.contains(&ids[4]));
+
+        // 跳过项三字段逐字节不变
+        let checks = store.check_results_map().unwrap();
+        let skipped = checks.get(&ids[3]).unwrap();
+        assert_eq!(skipped.url, "https://a.com/fresh");
+        assert_eq!(skipped.status, CheckStatus::Ok);
+        assert_eq!(skipped.checked_at, now);
+        assert_eq!(skipped.final_url, None);
+    }
+
+    #[test]
+    fn test_strict_hash_detects_query_change() {
+        // 严格 hash 必须识别 ?x=1 → ?x=2；模糊 hash 会把它们归为同一类，此处回归保护
+        let (mut store, ids) = seed(&["https://a.com/p?x=2"]);
+        store
+            .upsert_check_result(&cached(ids[0], "https://a.com/p?x=1", crate::now_ts()))
+            .unwrap();
+        let plan = store.incremental_targets(365).unwrap();
+        assert_eq!(plan.url_changed_count, 1);
+        assert_eq!(plan.skipped_count, 0);
+        assert_eq!(plan.targets, vec![ids[0]]);
+    }
+
+    #[test]
+    fn test_apply_redirects_syncs_check_result() {
+        let (mut store, ids) = seed(&["https://a.com/old"]);
+        let checked_at = crate::now_ts() - 100;
+        store
+            .upsert_check_result(&CheckResult {
+                node_id: ids[0],
+                url: "https://a.com/old".to_string(),
+                status: CheckStatus::Suspicious,
+                http_code: Some(403),
+                final_url: Some("https://a.com/new".to_string()),
+                message: None,
+                elapsed_ms: 5,
+                checked_at,
+            })
+            .unwrap();
+
+        let updated = store.apply_redirects(&[ids[0]]).unwrap();
+        assert_eq!(updated, 1);
+
+        let node = store
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == ids[0])
+            .unwrap();
+        assert_eq!(node.url.as_deref(), Some("https://a.com/new"));
+
+        let (url, hash, status, at) = store
+            .conn
+            .query_row(
+                "SELECT url, url_hash, status, checked_at FROM check_results WHERE node_id = ?1",
+                params![ids[0]],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let expected_hash = crate::urlnorm::url_hash_of("https://a.com/new").unwrap().1;
+        assert_eq!(url, "https://a.com/new");
+        assert_eq!(hash, expected_hash);
+        // 保留原状态与时间
+        assert_eq!(status, "suspicious");
+        assert_eq!(at, checked_at);
+
+        // 同步后不会被下一次增量检测判为 URL 变更
+        let plan = store.incremental_targets(7).unwrap();
+        assert!(plan.targets.is_empty());
+        assert_eq!(plan.skipped_count, 1);
+    }
 }

@@ -67,6 +67,11 @@ export const api = {
   setProxy: (proxy: string): Promise<void> => invoke("set_proxy", { proxy }),
   testProxy: (proxy: string): Promise<ProxyTestResult> => invoke("test_proxy", { proxy }),
 
+  // 通用设置（本机 SQLite settings 表）
+  getSetting: (key: string): Promise<string | null> => invoke("get_setting", { key }),
+  setSetting: (key: string, value: string): Promise<void> =>
+    invoke("set_setting", { key, value }),
+
   // ---------------- 第 2 期命令封装（后端命令由 T02-T05 实现并注册） ----------------
   // #9 模糊去重：preview 与 apply 必须使用同一份 opts
   fuzzyDedupPreview: (opts: FuzzyOptions): Promise<DupGroup[]> =>
@@ -111,5 +116,27 @@ export const api = {
   webdavImport: (name: string, mode: "replace" | "append"): Promise<ImportSummary> =>
     invoke("webdav_import", { name, mode }),
 };
+
+/** #11 超期阈值默认值与 settings 键（PRD §5.2）。 */
+export const DEFAULT_INCREMENTAL_DAYS = 7;
+export const INCREMENTAL_DAYS_KEY = "check_incremental_days";
+
+/** 读取超期阈值；非法/缺失值一律回退默认值，避免 `NaN` 传入后端。 */
+export async function getIncrementalDays(): Promise<number> {
+  try {
+    const raw = await api.getSetting(INCREMENTAL_DAYS_KEY);
+    if (raw == null || raw.trim() === "") return DEFAULT_INCREMENTAL_DAYS;
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 1 ? value : DEFAULT_INCREMENTAL_DAYS;
+  } catch {
+    return DEFAULT_INCREMENTAL_DAYS;
+  }
+}
+
+/** 写入超期阈值（预览与检测使用同一份配置快照）。 */
+export async function setIncrementalDays(days: number): Promise<void> {
+  const safe = Number.isInteger(days) && days >= 1 ? days : DEFAULT_INCREMENTAL_DAYS;
+  await api.setSetting(INCREMENTAL_DAYS_KEY, String(safe));
+}
 
 export type { CheckFinishedEvent };

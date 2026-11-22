@@ -8,7 +8,7 @@ use bookmark_core::checker::{test_proxy as core_test_proxy, CheckOptions, CheckS
 use bookmark_core::dedup;
 use bookmark_core::model::{NewNode, Node, NodeKind, NodeId, ROOT_ID};
 use bookmark_core::netscape;
-use bookmark_core::store::{ImportMode, ImportStats, Stats, TrashEntry};
+use bookmark_core::store::{is_http_url, ImportMode, ImportStats, Stats, TrashEntry};
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -99,7 +99,7 @@ pub struct StartCheckResult {
 // ---------------------------------------------------------------------------
 // 第 2 期 DTO 骨架
 //
-// 仅定义数据结构，不注册占位命令；命令函数将在 T02-T05 随 core 实现一并加入。
+// T01 定义骨架 DTO，T02 已实装 #11/#12 命令，T03-T05 随各自 core 实现继续补命令。
 // 输出型 DTO 只需 Serialize；作为命令入参的 DTO 额外派生 Deserialize。
 // core 侧的 Rule / RuleInput / WebDavConfig 属于 T04 / T05 的 rules.rs / webdav.rs，
 // 此处以 *Dto 命名避免与其重名，届时可做薄转换。
@@ -491,40 +491,17 @@ pub async fn dedup_apply(state: State<'_, AppState>) -> Result<usize, String> {
 // 链接检测
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-pub async fn start_check(
+/// 第 1 期全量检测与第 2 期增量检测共用的「检测执行段」。
+///
+/// 调用方只负责选目标；本函数负责复用代理配置、LinkChecker、取消机制，
+/// 以及 `check://progress` / `check://finished` 事件与结果写回。
+/// 跳过项不会进入 targets，因此不会写 check_results、不会清空原状态。
+fn run_check_targets(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    scope: String,
-    ids: Vec<NodeId>,
+    state: &AppState,
+    targets: Vec<CheckTarget>,
 ) -> Result<StartCheckResult, String> {
-    {
-        let run = state.run.lock().unwrap();
-        if run.is_some() {
-            return Err("已有检测任务在进行中".into());
-        }
-    }
-
-    let (targets, total) = {
-        let store = state.store.lock().unwrap();
-        let dfs = store.dfs_bookmarks().map_err(es)?;
-        let list: Vec<CheckTarget> = match scope.as_str() {
-            "selected" => {
-                let set: std::collections::HashSet<NodeId> = ids.iter().copied().collect();
-                dfs.into_iter()
-                    .filter(|(id, _)| set.contains(id))
-                    .map(|(node_id, url)| CheckTarget { node_id, url })
-                    .collect()
-            }
-            _ => dfs
-                .into_iter()
-                .map(|(node_id, url)| CheckTarget { node_id, url })
-                .collect(),
-        };
-        let total = list.len();
-        (list, total)
-    };
-
+    let total = targets.len();
     if total == 0 {
         return Ok(StartCheckResult { total: 0 });
     }
@@ -545,7 +522,6 @@ pub async fn start_check(
     let mut rx = checker.check_many(targets, opts, cancel.clone());
     let store_for_task = state.store.clone();
     let run_state = state.run.clone();
-    let total = total;
 
     tauri::async_runtime::spawn(async move {
         let mut done: i64 = 0;
@@ -591,11 +567,167 @@ pub async fn start_check(
 }
 
 #[tauri::command]
+pub async fn start_check(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    scope: String,
+    ids: Vec<NodeId>,
+) -> Result<StartCheckResult, String> {
+    {
+        let run = state.run.lock().unwrap();
+        if run.is_some() {
+            return Err("已有检测任务在进行中".into());
+        }
+    }
+
+    let targets: Vec<CheckTarget> = {
+        let store = state.store.lock().unwrap();
+        let dfs = store.dfs_bookmarks().map_err(es)?;
+        match scope.as_str() {
+            "selected" => {
+                let set: std::collections::HashSet<NodeId> = ids.iter().copied().collect();
+                dfs.into_iter()
+                    .filter(|(id, _)| set.contains(id))
+                    .map(|(node_id, url)| CheckTarget { node_id, url })
+                    .collect()
+            }
+            _ => dfs
+                .into_iter()
+                .map(|(node_id, url)| CheckTarget { node_id, url })
+                .collect(),
+        }
+    };
+    run_check_targets(app, state.inner(), targets)
+}
+
+#[tauri::command]
 pub async fn cancel_check(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(handle) = state.run.lock().unwrap().as_ref() {
         handle.cancel.store(true, Ordering::Relaxed);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// #11 增量检测
+// ---------------------------------------------------------------------------
+
+/// 预览增量检测计划：只读筛选，不执行网络请求、不改动任何检测结果。
+#[tauri::command]
+pub async fn incremental_preview(
+    state: State<'_, AppState>,
+    days: i64,
+) -> Result<IncrementalPlanDto, String> {
+    let store = state.store.lock().unwrap();
+    let plan = store.incremental_targets(days).map_err(es)?;
+    Ok(IncrementalPlanDto {
+        new_count: plan.new_count,
+        url_changed_count: plan.url_changed_count,
+        stale_count: plan.stale_count,
+        skipped_count: plan.skipped_count,
+        total: plan.targets.len(),
+    })
+}
+
+/// 增量检测：仅对筛选出的目标复用第 1 期检测流程、代理、事件与取消机制。
+#[tauri::command]
+pub async fn start_incremental_check(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    days: i64,
+) -> Result<StartCheckResult, String> {
+    {
+        let run = state.run.lock().unwrap();
+        if run.is_some() {
+            return Err("已有检测任务在进行中".into());
+        }
+    }
+
+    let targets: Vec<CheckTarget> = {
+        let store = state.store.lock().unwrap();
+        let plan = store.incremental_targets(days).map_err(es)?;
+        let selected: std::collections::HashSet<NodeId> = plan.targets.into_iter().collect();
+        // 按 DFS 顺序取 URL；selected 只含 HTTP 目标，跳过项不会进入检测队列
+        store
+            .dfs_bookmarks()
+            .map_err(es)?
+            .into_iter()
+            .filter(|(id, _)| selected.contains(id))
+            .map(|(node_id, url)| CheckTarget { node_id, url })
+            .collect()
+    };
+    run_check_targets(app, state.inner(), targets)
+}
+
+// ---------------------------------------------------------------------------
+// #12 重定向更新
+// ---------------------------------------------------------------------------
+
+/// 重定向候选：final_url 非空且 ≠ 当前地址、状态 ok/suspicious、HTTP 协议，按标题排序。
+#[tauri::command]
+pub async fn list_redirects(state: State<'_, AppState>) -> Result<Vec<RedirectDto>, String> {
+    let store = state.store.lock().unwrap();
+    let checks = store.check_results_map().map_err(es)?;
+    let nodes = store.all_nodes().map_err(es)?;
+    let node_map: HashMap<NodeId, Node> = nodes.iter().map(|n| (n.id, n.clone())).collect();
+
+    let mut result: Vec<RedirectDto> = checks
+        .into_iter()
+        .filter(|(_, r)| matches!(r.status, CheckStatus::Ok | CheckStatus::Suspicious))
+        .filter_map(|(id, r)| {
+            let n = node_map.get(&id)?;
+            if n.deleted || n.kind != NodeKind::Bookmark {
+                return None;
+            }
+            let old_url = n.url.clone().unwrap_or_default();
+            let new_url = r.final_url.clone().unwrap_or_default();
+            if old_url.trim().is_empty()
+                || new_url.trim().is_empty()
+                || old_url == new_url
+                || !is_http_url(&old_url)
+                || !is_http_url(&new_url)
+            {
+                return None;
+            }
+            Some(RedirectDto {
+                node_id: id,
+                title: n.title.clone(),
+                old_url,
+                new_url,
+                status: r.status,
+                checked_at: r.checked_at,
+            })
+        })
+        .collect();
+    result.sort_by(|a, b| {
+        a.title
+            .trim()
+            .to_lowercase()
+            .cmp(&b.title.trim().to_lowercase())
+            .then_with(|| a.node_id.cmp(&b.node_id))
+    });
+    Ok(result)
+}
+
+/// 应用重定向：先备份，再在同一事务内更新 nodes.url 与 check_results.url/url_hash。
+#[tauri::command]
+pub async fn apply_redirects(
+    state: State<'_, AppState>,
+    ids: Vec<NodeId>,
+) -> Result<RedirectApplyDto, String> {
+    let backup_path = {
+        let store = state.store.lock().unwrap();
+        let dir = state.data_dir.join("backups");
+        bookmark_core::backup::create_backup(&store, &dir).map_err(es)?
+    };
+    let updated = {
+        let mut store = state.store.lock().unwrap();
+        store.apply_redirects(&ids).map_err(es)?
+    };
+    Ok(RedirectApplyDto {
+        backup_path: backup_path.display().to_string(),
+        updated,
+    })
 }
 
 /// 失效项列表（删除前确认用）。
@@ -703,6 +835,24 @@ pub async fn get_proxy(state: State<'_, AppState>) -> Result<String, String> {
 pub async fn set_proxy(state: State<'_, AppState>, proxy: String) -> Result<(), String> {
     let mut store = state.store.lock().unwrap();
     store.set_setting("proxy", &proxy).map_err(es)
+}
+
+/// 通用设置读取（#11 用 `check_incremental_days` 读写超期阈值，缺省时前端回退 7 天）。
+#[tauri::command]
+pub async fn get_setting(state: State<'_, AppState>, key: String) -> Result<Option<String>, String> {
+    let store = state.store.lock().unwrap();
+    store.get_setting(&key).map_err(es)
+}
+
+/// 通用设置写入（仅本机 SQLite settings 表）。
+#[tauri::command]
+pub async fn set_setting(
+    state: State<'_, AppState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let mut store = state.store.lock().unwrap();
+    store.set_setting(&key, &value).map_err(es)
 }
 
 #[derive(Serialize)]
