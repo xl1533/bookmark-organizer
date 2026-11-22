@@ -54,8 +54,8 @@ const overrides = computed<GlobalThemeOverrides>(() => ({
     primary: "#2563eb",
     primaryHover: "#1d4ed8",
     primaryPressed: "#1e40af",
-    borderRadius: "6px",
-    borderRadiusSmall: "4px",
+    borderRadius: "8px",
+    borderRadiusSmall: "6px",
   },
 }));
 </script>
@@ -72,6 +72,10 @@ const overrides = computed<GlobalThemeOverrides>(() => ({
   --bo-surface-2: rgba(128, 128, 128, 0.06);
   --bo-primary: #2563eb;
   --bo-text-muted: #6b7280;
+  /* 状态色：浅色主题用加深值以满足正文对比度（WCAG AA） */
+  --bo-ok: #15803d;
+  --bo-susp: #b45309;
+  --bo-dead: #dc2626;
 }
 html,
 body,
@@ -91,6 +95,10 @@ body {
   --bo-border: rgba(255, 255, 255, 0.16);
   --bo-surface-2: rgba(255, 255, 255, 0.06);
   --bo-text-muted: #9ca3af;
+  /* 深色主题用亮色值，在深底上保持可读 */
+  --bo-ok: #4ade80;
+  --bo-susp: #fbbf24;
+  --bo-dead: #f87171;
 }
 body:has(.app-dark) {
   color-scheme: dark;

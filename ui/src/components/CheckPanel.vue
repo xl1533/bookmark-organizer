@@ -125,13 +125,13 @@ const pct = computed(() =>
   background: #ef4444;
 }
 .counter-card.ok b {
-  color: #22c55e;
+  color: var(--bo-ok, #15803d);
 }
 .counter-card.susp b {
-  color: #f59e0b;
+  color: var(--bo-susp, #b45309);
 }
 .counter-card.dead b {
-  color: #ef4444;
+  color: var(--bo-dead, #dc2626);
 }
 .last-url {
   font-size: 11px;
