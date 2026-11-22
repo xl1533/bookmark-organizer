@@ -124,6 +124,12 @@
     />
     <RedirectDialog v-model:show="showRedirect" @applied="onRedirectApplied" />
     <MergeFoldersDialog v-model:show="showMergeFolders" @applied="onMergeApplied" />
+    <RulesDialog v-model:show="showRules" @preview="onRulesPreview" />
+    <ClassifyPreviewDialog
+      v-model:show="showClassifyPreview"
+      :selected-ids="store.checkedIds"
+      @applied="onClassifyApplied"
+    />
 
     <!-- 树节点右键菜单（浏览器原生菜单已在 main.ts 中屏蔽） -->
     <n-dropdown
@@ -260,6 +266,8 @@ import SettingsDialog from "./SettingsDialog.vue";
 import IncrementDialog from "./IncrementDialog.vue";
 import RedirectDialog from "./RedirectDialog.vue";
 import MergeFoldersDialog from "./MergeFoldersDialog.vue";
+import RulesDialog from "./RulesDialog.vue";
+import ClassifyPreviewDialog from "./ClassifyPreviewDialog.vue";
 
 const store = useAppStore();
 const { t } = useI18n();
@@ -702,6 +710,21 @@ async function onMergeApplied(result: MergeResultDto) {
   await store.refresh();
 }
 
+// ---------------- T04：规则归类 ----------------
+const showRules = ref(false);
+const showClassifyPreview = ref(false);
+
+function onRulesPreview(): void {
+  showRules.value = false;
+  showClassifyPreview.value = true;
+}
+
+async function onClassifyApplied(_count: number): Promise<void> {
+  // 成功提示已在预览对话框内展示，这里只刷新树与统计。
+  store.checkedIds = [];
+  await store.refresh();
+}
+
 const showEmpty = ref(false);
 const emptyItems = ref<ItemDto[]>([]);
 async function openEmpty() {
@@ -752,8 +775,10 @@ function onOrganizeSelect(key: string) {
     showRedirect.value = true;
     return;
   }
-  // T04 规则归类尚未接入；给出明确反馈，避免点击后静默无响应。
-  message.info(t("comingSoon"));
+  if (key === "rulesClassify") {
+    showRules.value = true;
+    return;
+  }
 }
 
 function onIncrementalCheck() {

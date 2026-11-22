@@ -17,11 +17,13 @@ pub mod dedup;
 pub mod empty;
 pub mod model;
 pub mod netscape;
+pub mod rules;
 pub mod store;
 pub mod urlnorm;
 
 pub use checker::{CheckOptions, CheckResult, CheckStatus, CheckTarget, LinkChecker};
 pub use model::{NewNode, Node, NodeId, NodeKind, ROOT_ID};
+pub use rules::{Rule, RuleField, RuleInput, RuleSet};
 pub use store::{Store, TrashEntry};
 
 /// 统一错误类型。

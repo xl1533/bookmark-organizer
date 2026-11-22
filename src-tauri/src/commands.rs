@@ -1,13 +1,15 @@
 //! Tauri 命令层：薄封装 bookmark-core，负责 DTO 转换、路径展示与事件推送。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bookmark_core::checker::{test_proxy as core_test_proxy, CheckOptions, CheckStatus, CheckTarget, LinkChecker};
 use bookmark_core::dedup;
 use bookmark_core::model::{NewNode, Node, NodeKind, NodeId, ROOT_ID};
 use bookmark_core::netscape;
+use bookmark_core::rules::{Rule, RuleField, RuleInput, RuleSet};
+use bookmark_core::Store;
 use bookmark_core::store::{
     is_http_url, ImportMode, ImportStats, MergeFolderGroup, MergeOutcome, Stats, TrashEntry,
 };
@@ -176,37 +178,10 @@ pub struct RedirectApplyDto {
     pub updated: usize,
 }
 
-/// #13 规则匹配字段（包含匹配，大小写不敏感；host 额外支持后缀匹配）。
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RuleFieldDto {
-    Host,
-    UrlKeyword,
-    TitleKeyword,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuleDto {
-    pub id: String,
-    pub field: RuleFieldDto,
-    pub pattern: String,
-    pub target_path: String,
-    pub enabled: bool,
-}
-
-/// #13 新增规则入参：id 由后端生成（时间戳 + 序号）后回填。
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuleInputDto {
-    pub field: RuleFieldDto,
-    pub pattern: String,
-    pub target_path: String,
-    pub enabled: bool,
-}
+/// #13 规则 DTO 直接复用 core 类型，避免两处字段定义漂移（camelCase 由 core 派生）。
+pub type RuleFieldDto = RuleField;
+pub type RuleDto = Rule;
+pub type RuleInputDto = RuleInput;
 
 /// #13 归类预览行：命中规则与目标路径，冲突项标红。
 #[allow(dead_code)]
@@ -263,6 +238,42 @@ pub struct WebDavUploadDto {
 // ---------------------------------------------------------------------------
 // 内部工具
 // ---------------------------------------------------------------------------
+
+/// 规则 id 序号：同一毫秒内新增多条也不冲突。
+static RULE_ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_rule_id() -> String {
+    format!(
+        "r{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        RULE_ID_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// 从 settings.classify_rules 读取规则集；缺失/非法时回退示例规则。
+fn load_rule_set(store: &Store) -> Result<RuleSet, String> {
+    let raw = store.get_setting("classify_rules").map_err(es)?;
+    Ok(match raw {
+        Some(value) if !value.trim().is_empty() => RuleSet::from_settings_json(&value),
+        _ => RuleSet::sample(),
+    })
+}
+
+fn save_rule_set(store: &mut Store, rules: &RuleSet) -> Result<(), String> {
+    store
+        .set_setting("classify_rules", &rules.to_settings_json())
+        .map_err(es)
+}
+
+fn validate_rule_fields(pattern: &str, target_path: &str) -> Result<(), String> {
+    if pattern.trim().is_empty() {
+        return Err("请输入匹配值".to_string());
+    }
+    if target_path.trim().is_empty() {
+        return Err("请输入目标目录".to_string());
+    }
+    Ok(())
+}
 
 /// 计算每个存活节点的展示路径（不含根目录名）。
 fn alive_paths(nodes: &[Node]) -> HashMap<NodeId, String> {
@@ -589,6 +600,175 @@ pub async fn merge_folders_apply(
         merged_groups: outcome.merged_groups,
         moved_nodes: outcome.moved_nodes,
     })
+}
+
+// ---------------------------------------------------------------------------
+// #13 规则归类：规则 CRUD + 预览 / 应用
+// ---------------------------------------------------------------------------
+
+/// 规则列表；设置项缺失时回填示例规则并持久化。
+#[tauri::command]
+pub async fn rule_list(state: State<'_, AppState>) -> Result<Vec<RuleDto>, String> {
+    let mut store = state.store.lock().unwrap();
+    let rules = load_rule_set(&store)?;
+    let raw = store.get_setting("classify_rules").map_err(es)?;
+    if raw.as_deref().unwrap_or("").trim().is_empty() {
+        save_rule_set(&mut store, &rules)?;
+    }
+    Ok(rules.rules)
+}
+
+/// 新增规则：后端生成 id，回填后整集写回 settings（保持列表顺序）。
+#[tauri::command]
+pub async fn rule_add(
+    state: State<'_, AppState>,
+    rule: RuleInputDto,
+) -> Result<RuleDto, String> {
+    validate_rule_fields(&rule.pattern, &rule.target_path)?;
+    let mut store = state.store.lock().unwrap();
+    let mut rules = load_rule_set(&store)?;
+    let created = RuleInput {
+        field: rule.field,
+        pattern: rule.pattern.trim().to_string(),
+        target_path: rule.target_path.trim().to_string(),
+        enabled: rule.enabled,
+    }
+    .into_rule(next_rule_id());
+    rules.rules.push(created.clone());
+    save_rule_set(&mut store, &rules)?;
+    Ok(created)
+}
+
+/// 按 id 原位更新规则（id 不可修改）。
+#[tauri::command]
+pub async fn rule_update(state: State<'_, AppState>, rule: RuleDto) -> Result<(), String> {
+    validate_rule_fields(&rule.pattern, &rule.target_path)?;
+    let mut store = state.store.lock().unwrap();
+    let mut rules = load_rule_set(&store)?;
+    let entry = rules
+        .rules
+        .iter_mut()
+        .find(|r| r.id == rule.id)
+        .ok_or_else(|| "规则不存在".to_string())?;
+    *entry = rule;
+    save_rule_set(&mut store, &rules)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rule_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut store = state.store.lock().unwrap();
+    let mut rules = load_rule_set(&store)?;
+    let before = rules.rules.len();
+    rules.rules.retain(|r| r.id != id);
+    if rules.rules.len() == before {
+        return Err("规则不存在".to_string());
+    }
+    save_rule_set(&mut store, &rules)?;
+    Ok(())
+}
+
+/// 按传入 id 顺序重排；未列出的规则由 core 追加在末尾，不会丢失。
+#[tauri::command]
+pub async fn rule_reorder(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let mut store = state.store.lock().unwrap();
+    let mut rules = load_rule_set(&store)?;
+    rules.reorder(&ids);
+    save_rule_set(&mut store, &rules)?;
+    Ok(())
+}
+
+/// 归类预览：只读。作用域 = 根目录未归类书签 ∪ 显式勾选，开关打开时扩展到全部存活书签。
+/// 每项取自上而下首个命中规则；冲突项标红但不移动任何节点。
+#[tauri::command]
+pub async fn classify_preview(
+    state: State<'_, AppState>,
+    include_classified: bool,
+    selected_ids: Vec<NodeId>,
+) -> Result<Vec<ClassifyItemDto>, String> {
+    let store = state.store.lock().unwrap();
+    let rules = load_rule_set(&store)?;
+    let candidates = store
+        .classify_candidates(include_classified, &selected_ids)
+        .map_err(es)?;
+    let nodes = store.all_nodes().map_err(es)?;
+    let node_map: HashMap<NodeId, Node> = nodes
+        .iter()
+        .filter(|n| !n.deleted)
+        .map(|n| (n.id, n.clone()))
+        .collect();
+
+    let mut out = Vec::new();
+    for id in candidates {
+        let node = match node_map.get(&id) {
+            Some(n) => n,
+            None => continue,
+        };
+        let url = node.url.clone().unwrap_or_default();
+        let matched = match rules.first_match(&url, &node.title) {
+            Some(r) => r,
+            None => continue,
+        };
+        let target = matched.target_path.trim();
+        if target.is_empty() {
+            continue;
+        }
+        out.push(ClassifyItemDto {
+            node_id: id,
+            title: node.title.clone(),
+            current_path: store.node_path(id).map_err(es)?,
+            matched_rule_id: matched.id.clone(),
+            matched_rule_pattern: matched.pattern.clone(),
+            target_path: target.to_string(),
+            conflict: store.path_has_conflict(target).map_err(es)?,
+        });
+    }
+    Ok(out)
+}
+
+/// 归类应用：仅处理勾选且无冲突的项，逐级建目录后走 move_nodes（含自身子树校验）。
+#[tauri::command]
+pub async fn classify_apply(
+    state: State<'_, AppState>,
+    items: Vec<ClassifyChoiceDto>,
+) -> Result<usize, String> {
+    let mut store = state.store.lock().unwrap();
+
+    // 先整批复检，避免部分项目已移动后才发现冲突
+    let mut plan: Vec<(NodeId, String)> = Vec::new();
+    {
+        let nodes = store.all_nodes().map_err(es)?;
+        let alive: HashMap<NodeId, Node> = nodes
+            .iter()
+            .filter(|n| !n.deleted)
+            .map(|n| (n.id, n.clone()))
+            .collect();
+        for item in items {
+            let target = item.target_path.trim();
+            if target.is_empty() {
+                continue;
+            }
+            match alive.get(&item.node_id) {
+                Some(n) if n.kind == NodeKind::Bookmark && n.id != ROOT_ID => {}
+                _ => continue,
+            }
+            if store.path_has_conflict(target).map_err(es)? {
+                continue;
+            }
+            plan.push((item.node_id, target.to_string()));
+        }
+    }
+
+    let mut classified = 0usize;
+    for (node_id, target) in plan {
+        let folder_id = store.create_missing_path(&target).map_err(es)?;
+        store.move_nodes(&[node_id], folder_id, 99999).map_err(es)?;
+        classified += 1;
+    }
+    Ok(classified)
 }
 
 // ---------------------------------------------------------------------------

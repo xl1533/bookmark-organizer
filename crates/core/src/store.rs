@@ -778,6 +778,103 @@ impl Store {
     }
 
     // ------------------------------------------------------------------
+    // #13 规则归类：作用域、路径与冲突
+    // ------------------------------------------------------------------
+
+    /// 节点从书签栏起的展示路径（不含根目录名），如 `开发/前端`。
+    /// 只回溯存活节点；根节点或已删除节点返回空字符串。
+    pub fn node_path(&self, node_id: NodeId) -> CoreResult<String> {
+        let mut segments: Vec<String> = Vec::new();
+        let mut current = node_id;
+        for _ in 0..1000 {
+            if current == ROOT_ID {
+                break;
+            }
+            let row: Option<(NodeId, String)> = self
+                .conn
+                .query_row(
+                    "SELECT parent_id, title FROM nodes WHERE id = ?1 AND deleted = 0",
+                    params![current],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let (parent, title) = match row {
+                Some(v) => v,
+                None => return Ok(String::new()),
+            };
+            segments.push(title);
+            current = parent;
+        }
+        if current != ROOT_ID {
+            return Ok(String::new()); // 祖先链异常（环）时不再拼接
+        }
+        segments.reverse();
+        Ok(segments.join("/"))
+    }
+
+    /// #13 归类作用域：直接位于书签栏下的未归类书签 ∪ 显式勾选的存活书签。
+    /// `include_classified=true` 时扩展到所有存活书签；按 DFS 顺序返回，永不返回文件夹。
+    pub fn classify_candidates(
+        &self,
+        include_classified: bool,
+        selected_ids: &[NodeId],
+    ) -> CoreResult<Vec<NodeId>> {
+        let nodes = self.load_nodes(false)?;
+        let direct: std::collections::HashSet<NodeId> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Bookmark && n.parent_id == ROOT_ID)
+            .map(|n| n.id)
+            .collect();
+        let selected: std::collections::HashSet<NodeId> = selected_ids.iter().copied().collect();
+        let mut out = Vec::new();
+        for (id, _) in self.dfs_bookmarks()? {
+            if include_classified || selected.contains(&id) || direct.contains(&id) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 目标路径是否与存活书签节点同名冲突（逐级检查；某段缺失后不可能再冲突）。
+    pub fn path_has_conflict(&self, path: &str) -> CoreResult<bool> {
+        let mut parent = ROOT_ID;
+        for raw in path.split('/') {
+            let segment = raw.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            match child_by_title(&self.conn, parent, segment)? {
+                Some((id, NodeKind::Folder)) => parent = id,
+                Some(_) => return Ok(true),
+                None => return Ok(false),
+            }
+        }
+        Ok(false)
+    }
+
+    /// 逐级确保目标路径存在（相对书签栏），返回末端文件夹 id。
+    /// 任一段与书签节点同名时返回 Err，调用方据此标记 conflict，绝不静默覆盖。
+    pub fn create_missing_path(&mut self, path: &str) -> CoreResult<NodeId> {
+        let mut parent = ROOT_ID;
+        for raw in path.split('/') {
+            let segment = raw.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            match child_by_title(&self.conn, parent, segment)? {
+                Some((id, NodeKind::Folder)) => parent = id,
+                Some(_) => {
+                    return Err(crate::CoreError::Other(format!(
+                        "目标路径与书签节点冲突: {segment}"
+                    )))
+                }
+                None => parent = self.create_folder(parent, segment, 99999)?,
+            }
+        }
+        Ok(parent)
+    }
+
+    // ------------------------------------------------------------------
     // 设置
     // ------------------------------------------------------------------
 
@@ -946,6 +1043,23 @@ fn move_nodes_in_tx(
         }
     }
     Ok(())
+}
+
+/// 按标题查找存活直接子节点（同标题取 position 最前者），用于 #13 路径逐级解析。
+fn child_by_title(
+    conn: &Connection,
+    parent: NodeId,
+    title: &str,
+) -> CoreResult<Option<(NodeId, NodeKind)>> {
+    let raw: Option<(NodeId, String)> = conn
+        .query_row(
+            "SELECT id, kind FROM nodes WHERE parent_id = ?1 AND title = ?2 AND deleted = 0
+             ORDER BY position, id LIMIT 1",
+            params![parent, title],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(raw.map(|(id, kind)| (id, NodeKind::from_str(&kind))))
 }
 
 /// `soft_delete` 的事务内实现，供 #10 合并文件夹复用。
@@ -1522,5 +1636,63 @@ mod tests {
         let two = nodes.iter().find(|n| n.title == "two").unwrap();
         assert_eq!(two.parent_id, ui_folders[0].id);
         assert_eq!(store.list_trash().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_create_missing_path_and_conflict() {
+        let mut store = Store::open_in_memory().unwrap();
+        let tree = vec![
+            NewNode::folder("开发", vec![]),
+            NewNode::bookmark("前端", "https://a.com", None, None),
+        ];
+        store.import_children(&tree, ImportMode::Replace).unwrap();
+        let nodes = store.all_nodes().unwrap();
+        let dev_id = nodes
+            .iter()
+            .find(|n| n.title == "开发" && n.kind == NodeKind::Folder)
+            .unwrap()
+            .id;
+
+        // 根部已有同名书签，但在「开发」下仍可逐级新建同名文件夹
+        let folder_id = store.create_missing_path(" 开发 /前端 ").unwrap();
+        let created = store
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.parent_id == dev_id && n.title == "前端" && n.kind == NodeKind::Folder)
+            .unwrap();
+        assert_eq!(folder_id, created.id);
+        assert_eq!(store.node_path(folder_id).unwrap(), "开发/前端");
+
+        // 根部「前端」是书签：预览标冲突，应用拒绝创建
+        assert!(store.path_has_conflict("前端").unwrap());
+        assert!(store.create_missing_path("前端").is_err());
+        // 缺失段不视作冲突
+        assert!(!store.path_has_conflict("开发/新目录").unwrap());
+        assert_eq!(store.node_path(ROOT_ID).unwrap(), "");
+    }
+
+    #[test]
+    fn test_classify_candidates_scope() {
+        let mut store = Store::open_in_memory().unwrap();
+        let tree = vec![
+            NewNode::bookmark("root-item", "https://r.com", None, None),
+            NewNode::folder(
+                "F",
+                vec![NewNode::bookmark("inner", "https://i.com", None, None)],
+            ),
+        ];
+        store.import_children(&tree, ImportMode::Replace).unwrap();
+        let nodes = store.all_nodes().unwrap();
+        let root_item = nodes.iter().find(|n| n.title == "root-item").unwrap().id;
+        let inner = nodes.iter().find(|n| n.title == "inner").unwrap().id;
+
+        // 默认仅根目录未归类书签
+        assert_eq!(store.classify_candidates(false, &[]).unwrap(), vec![root_item]);
+        // 显式勾选可把子目录书签纳入
+        let selected = store.classify_candidates(false, &[inner]).unwrap();
+        assert_eq!(selected, vec![root_item, inner]);
+        // 开关打开后全部存活书签
+        assert_eq!(store.classify_candidates(true, &[]).unwrap(), vec![root_item, inner]);
     }
 }
