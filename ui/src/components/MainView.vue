@@ -399,8 +399,10 @@ function rootFolderId(): number | null {
 const dragIds = ref<number[]>([]);
 const forbiddenDropIds = ref<Set<number>>(new Set());
 
-function onTreeDragStart({ node }: { node: TreeOption }) {
+function onTreeDragStart({ event, node }: { event: DragEvent; node: TreeOption }) {
   const id = (node as NodeItem).node.id;
+  // 某些 WebView 内核要求 dragstart 必须有 dataTransfer 数据才会触发后续 dragover/drop
+  event.dataTransfer?.setData("text/plain", String(id));
   // 拖拽已勾选的节点时，连同其他勾选节点一起移动
   dragIds.value =
     store.checkedIds.length > 0 && store.checkedIds.includes(id)
