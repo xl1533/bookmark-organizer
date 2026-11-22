@@ -185,12 +185,10 @@ impl LinkChecker {
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
-                        // 全局许可：保证同时在网的请求 ≤ concurrency
-                        let _permit = permit_sem.acquire_owned().await;
-                        if cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        // 同域许可：保证同一 host 同时在途 ≤ per_host_concurrency
+                        // 必须先拿同域许可、再拿全局许可。
+                        // 若反过来：单站点大批量任务会先占满全部全局许可，再卡在同域等待，
+                        // 导致全局并发被"空等"任务耗尽，其它域名的任务被饿死（并发塌陷）。
+                        // 先拿同域则让等待发生在全局许可之前，空等任务不占用全局名额。
                         let host = host_of(&target.url);
                         let host_sem = {
                             let mut map = host_sems.lock().await;
@@ -199,6 +197,11 @@ impl LinkChecker {
                                 .clone()
                         };
                         let _host_permit = host_sem.acquire_owned().await;
+                        if cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        // 全局许可：保证同时在网的请求 ≤ concurrency
+                        let _permit = permit_sem.acquire_owned().await;
                         if cancel.load(Ordering::Relaxed) {
                             return;
                         }
